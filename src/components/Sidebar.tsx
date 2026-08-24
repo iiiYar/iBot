@@ -6,6 +6,16 @@ import { STRINGS, type Lang } from "../i18n";
 
 type TreeNode = { name: string; type: "dir" | "file"; size: number };
 
+function FileIcon({ name }: { name: string }) {
+  const ext = name.split(".").pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    ts: "📘", tsx: "⚛️", js: "📙", jsx: "⚛️",
+    css: "🎨", json: "📋", md: "📝", py: "🐍",
+    sh: "🔧", env: "🔑", gitignore: "🙈",
+  };
+  return <span style={{ fontSize: 11, opacity: .7 }}>{map[ext ?? ""] ?? "📄"}</span>;
+}
+
 function ExpandedDir({
   root, rel, depth, expanded, toggle, refreshKey,
 }: {
@@ -17,7 +27,9 @@ function ExpandedDir({
     void window.botyar.fsList(root, rel).then(setNodes).catch(() => setNodes([]));
   }, [root, rel, refreshKey]);
   if (nodes === null)
-    return <div className="tree-row" style={{ paddingInlineStart: 10 + depth * 14 }}>…</div>;
+    return <div className="file-tree-item" style={{ paddingInlineStart: 10 + depth * 14 }}>
+      <div className="skeleton" style={{ width: 80, height: 10, borderRadius: 4 }} />
+    </div>;
   const render = (items: TreeNode[], parentRel: string, d: number): React.ReactNode =>
     items.map((node) => {
       const childRel = `${parentRel}/${node.name}`;
@@ -25,8 +37,10 @@ function ExpandedDir({
         const isOpen = expanded.has(childRel);
         return (
           <div key={childRel}>
-            <div className="tree-row dir" style={{ paddingInlineStart: 10 + d * 14 }} onClick={() => toggle(childRel)}>
-              <span className="chev">{isOpen ? "▾" : "▸"}</span> {node.name}
+            <div className="file-tree-item" style={{ paddingInlineStart: 10 + d * 14 }} onClick={() => toggle(childRel)}>
+              <span className="file-tree-item-icon">{isOpen ? "▾" : "▸"}</span>
+              <span style={{ opacity: .85 }}>📁</span>
+              <span>{node.name}</span>
             </div>
             {isOpen && (
               <ExpandedDir root={root} rel={childRel} depth={d + 1}
@@ -35,7 +49,12 @@ function ExpandedDir({
           </div>
         );
       }
-      return <div key={childRel} className="tree-row file" style={{ paddingInlineStart: 24 + d * 14 }}>{node.name}</div>;
+      return (
+        <div key={childRel} className="file-tree-item" style={{ paddingInlineStart: 24 + d * 14 }}>
+          <FileIcon name={node.name} />
+          <span>{node.name}</span>
+        </div>
+      );
     });
   return <>{render(nodes, rel, depth)}</>;
 }
@@ -60,8 +79,10 @@ function FileTree({ root, refreshKey, emptyText }: { root: string; refreshKey: n
         const isOpen = expanded.has(rel);
         return (
           <div key={rel}>
-            <div className="tree-row dir" style={{ paddingInlineStart: 10 + depth * 14 }} onClick={() => toggle(rel)}>
-              <span className="chev">{isOpen ? "▾" : "▸"}</span> {node.name}
+            <div className="file-tree-item" style={{ paddingInlineStart: 10 + depth * 14 }} onClick={() => toggle(rel)}>
+              <span className="file-tree-item-icon">{isOpen ? "▾" : "▸"}</span>
+              <span style={{ opacity: .85 }}>📁</span>
+              <span>{node.name}</span>
             </div>
             {isOpen && (
               <ExpandedDir root={root} rel={rel} depth={depth + 1}
@@ -70,10 +91,15 @@ function FileTree({ root, refreshKey, emptyText }: { root: string; refreshKey: n
           </div>
         );
       }
-      return <div key={rel} className="tree-row file" style={{ paddingInlineStart: 24 + depth * 14 }}>{node.name}</div>;
+      return (
+        <div key={rel} className="file-tree-item" style={{ paddingInlineStart: 24 + depth * 14 }}>
+          <FileIcon name={node.name} />
+          <span>{node.name}</span>
+        </div>
+      );
     });
-  if (!tree.length) return <div className="sidebar-empty">{emptyText}</div>;
-  return <div className="tree">{renderNodes(tree, ".", 0)}</div>;
+  if (!tree.length) return <div className="empty-state">{emptyText}</div>;
+  return <div>{renderNodes(tree, ".", 0)}</div>;
 }
 
 export interface SidebarProps {
@@ -103,121 +129,166 @@ export function Sidebar({
   const t = STRINGS[lang];
   const [view, setView] = useState<"sessions" | "files" | "todos" | "skills">("sessions");
   const activeLive = getLiveSession(activeSessionId);
+  const hasRunning = sessions.some((s) => getLiveSession(s.id).running);
+  const hasTodoActive = activeLive.todos.some((x) => x.status === "in_progress");
 
   return (
     <aside className="sidebar">
-      {/* ── Head ── */}
-      <div className="sidebar-head">
-        <div className="brand">
-          <span className="logo">◈</span>
-          <span className="name">{t.appName}</span>
-        </div>
-        <button className="icon-btn" title={t.settings} onClick={() => onOpenSettings("general")}>⚙</button>
+      {/* ── Brand ── */}
+      <div className="sidebar-brand">
+        <div className="sidebar-brand-logo">◈</div>
+        <span className="sidebar-brand-name">{t.appName}</span>
+        <span className="sidebar-brand-version">v0.7</span>
       </div>
 
-      {/* ── New chat ── */}
-      <button className="new-chat-btn" onClick={onNewSession}>
-        <span className="plus">+</span> {t.newChat}
-      </button>
+      {/* ── Quick actions ── */}
+      <div style={{ padding: "8px 12px", display: "flex", gap: 8 }}>
+        <button className="btn primary" style={{ flex: 1, fontSize: 12 }} onClick={onNewSession}>
+          + {t.newChat}
+        </button>
+        <button className="btn icon" title={t.pickFolder} onClick={onPickFolder}
+          style={{ flexShrink: 0 }}>📁</button>
+        <button className="btn icon" title={t.settings} onClick={() => onOpenSettings("general")}
+          style={{ flexShrink: 0 }}>⚙</button>
+      </div>
 
       {/* ── Project chip ── */}
-      <button className="project-chip" onClick={onPickFolder} title={projectRoot ?? t.pickFolder}>
-        <span>📁</span>
-        <span className="project-name">{projectRoot ? projectRoot.split(/[\\/]/).pop() : t.noFolder}</span>
-      </button>
+      {projectRoot && (
+        <div style={{ padding: "0 12px 8px" }}>
+          <div className="chip accent" style={{ width: "100%", justifyContent: "flex-start", cursor: "pointer" }}
+            onClick={onPickFolder}>
+            <span>📁</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {projectRoot.split(/[\\/]/).pop()}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* ── Segment tabs ── */}
-      <div className="sidebar-section">
-        <div className="segment">
-          <button className={view === "sessions" ? "active" : ""} onClick={() => setView("sessions")}>{t.sessions}</button>
-          <button className={view === "files"   ? "active" : ""} onClick={() => setView("files")}>{t.files}</button>
-          <button className={view === "todos"   ? "active" : ""} onClick={() => setView("todos")}>
-            {t.todos}
-            {activeLive.todos.some((x) => x.status === "in_progress") && <span className="pulse-dot" style={{ marginInlineStart: 4 }} />}
+      <div className="sidebar-tabs">
+        {(["sessions", "files", "todos", "skills"] as const).map((v) => (
+          <button
+            key={v}
+            className={`sidebar-tab ${view === v ? "active" : ""}`}
+            onClick={() => setView(v)}
+          >
+            {v === "sessions" && "Chat"}
+            {v === "files"   && "Files"}
+            {v === "todos"   && (
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                Plan
+                {hasTodoActive && <span className="dot-running" style={{ width: 5, height: 5 }} />}
+              </span>
+            )}
+            {v === "skills"  && "/cmd"}
           </button>
-          {skills.length > 0 && (
-            <button className={view === "skills" ? "active" : ""} onClick={() => setView("skills")}>/{"..."}</button>
-          )}
-        </div>
+        ))}
+      </div>
 
-        <div className="sidebar-content">
-          {/* Sessions */}
-          {view === "sessions" && (
-            <div className="sessions-panel">
-              {sessions.length === 0 && <div className="sidebar-empty">{t.emptyProject}</div>}
-              {sessions.map((s) => {
-                const live = getLiveSession(s.id);
-                return (
-                  <div key={s.id}
-                    className={`session-row ${s.id === activeSessionId ? "active" : ""}`}
-                    onClick={() => onSwitchSession(s.id)}
-                  >
-                    <div className="session-main">
-                      <div className="session-title">
-                        {live.running && <span className="pulse-dot" />}
-                        {s.title || t.newChat}
-                      </div>
-                      <div className="session-sub" dir="auto">
-                        {live.projectRoot ? live.projectRoot.split(/[\\/]/).pop() : t.noFolder}
-                      </div>
-                    </div>
-                    <button className="session-delete" title="✕"
-                      onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}>✕</button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+      {/* ── Body ── */}
+      <div className="sidebar-body">
 
-          {/* Files */}
-          {view === "files" && (
-            projectRoot
-              ? <FileTree root={projectRoot} refreshKey={treeRefresh} emptyText={t.noFiles} />
-              : <div className="sidebar-empty">{t.emptyProject}</div>
-          )}
+        {/* Sessions */}
+        {view === "sessions" && (
+          sessions.length === 0
+            ? <div className="empty-state" style={{ padding: "32px 16px" }}>{t.emptyProject}</div>
+            : sessions.map((s) => {
+              const live = getLiveSession(s.id);
+              return (
+                <div key={s.id}
+                  className={`session-row ${s.id === activeSessionId ? "active" : ""}`}
+                  onClick={() => onSwitchSession(s.id)}
+                >
+                  <span className="session-row-icon">
+                    {live.running ? "●" : "○"}
+                  </span>
+                  <span className="session-row-title" dir="auto">
+                    {s.title || t.newChat}
+                  </span>
+                  {live.running && (
+                    <span className="session-row-running">
+                      <span className="stream-dot" />
+                      <span className="stream-dot" />
+                      <span className="stream-dot" />
+                    </span>
+                  )}
+                  {hasRunning && !live.running && (
+                    <button className="session-row-del"
+                      title="Delete"
+                      onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}
+                    >✕</button>
+                  )}
+                  {!hasRunning && (
+                    <button className="session-row-del"
+                      title="Delete"
+                      onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}
+                    >✕</button>
+                  )}
+                </div>
+              );
+            })
+        )}
 
-          {/* Todos */}
-          {view === "todos" && (
-            <div className="todos-panel">
-              {activeLive.todos.length === 0 && <div className="sidebar-empty">{t.noTodos}</div>}
+        {/* Files */}
+        {view === "files" && (
+          projectRoot
+            ? <FileTree root={projectRoot} refreshKey={treeRefresh} emptyText={t.noFiles} />
+            : <div className="empty-state" style={{ padding: "32px 16px" }}>{t.emptyProject}</div>
+        )}
+
+        {/* Todos (Plan) */}
+        {view === "todos" && (
+          activeLive.todos.length === 0
+            ? <div className="empty-state" style={{ padding: "32px 16px" }}>{t.noTodos}</div>
+            : <div className="todo-list" style={{ padding: "8px 12px" }}>
               {activeLive.todos.map((td) => (
                 <div key={td.id} className={`todo-item ${td.status}`}>
-                  <span className="todo-check">
-                    {td.status === "completed" ? "✓" : td.status === "in_progress" ? "●" : td.status === "cancelled" ? "×" : "○"}
-                  </span>
-                  <span>{td.content}</span>
+                  <span className={`todo-dot ${td.status}`} />
+                  <span className={`todo-text ${td.status}`}>{td.content}</span>
                 </div>
               ))}
             </div>
-          )}
+        )}
 
-          {/* Skills dashboard */}
-          {view === "skills" && (
-            <div className="skills-panel">
-              <div className="skills-panel-title">Slash commands</div>
-              {skills.map((s) => (
-                <div key={s.path} className="skill-row" onClick={() => onSkillClick(s.name)}>
-                  <span className="skill-row-name">/{s.name}</span>
-                  <span className="skill-row-desc" dir="auto">{s.description}</span>
-                </div>
-              ))}
-              {mcpToolCount > 0 && (
-                <>
-                  <div className="skills-panel-sep" />
-                  <div className="skills-panel-title">MCP tools ({mcpToolCount})</div>
-                  <div className="skills-panel-hint" onClick={() => onOpenSettings("mcp")}>
-                    🔌 {mcpToolCount} {STRINGS[lang].mcpActive} — click to manage
+        {/* Skills */}
+        {view === "skills" && (
+          <div>
+            {skills.length > 0 && (
+              <>
+                <div className="skills-section-title">Slash commands</div>
+                {skills.map((s) => (
+                  <div key={s.path} className="skill-row" onClick={() => onSkillClick(s.name)}>
+                    <span className="skill-row-name">/{s.name}</span>
+                    <span className="skill-row-desc">{s.description}</span>
                   </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+                ))}
+              </>
+            )}
+            {mcpToolCount > 0 && (
+              <>
+                <div className="divider" style={{ margin: "8px 12px" }} />
+                <div className="skills-section-title">MCP tools ({mcpToolCount})</div>
+                <div className="skill-row" onClick={() => onOpenSettings("mcp")}>
+                  <span className="skill-row-name">🔌 {mcpToolCount} active</span>
+                  <span className="skill-row-desc">Click to manage servers</span>
+                </div>
+              </>
+            )}
+            {skills.length === 0 && mcpToolCount === 0 && (
+              <div className="empty-state" style={{ padding: "32px 16px" }}>No skills loaded</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Footer ── */}
-      <div className="sidebar-foot">
-        <button className="lang-btn" onClick={onLangToggle}>🌐 {t.language}</button>
+      <div className="sidebar-footer">
+        <button className="btn ghost" style={{ fontSize: 11, padding: "4px 8px" }} onClick={onLangToggle}>
+          🌐 {t.language}
+        </button>
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost icon" onClick={() => onOpenSettings("docker")} title="Docker">🐳</button>
       </div>
     </aside>
   );

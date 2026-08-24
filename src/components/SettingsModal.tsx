@@ -1,186 +1,191 @@
-import React, { useCallback, useState } from "react";
-import { McpSettings } from "../McpSettings";
-import { DockerPanel } from "../DockerPanel";
+import React, { useState } from "react";
 import type { Lang } from "../i18n";
 import { STRINGS } from "../i18n";
-import type { McpToolInfo } from "../global";
+import McpSettings from "../McpSettings";
+import { DockerPanel } from "../DockerPanel";
 
 const MODELS = [
-  { id: "anthropic/claude-sonnet-4.5", label: "Claude Sonnet 4.5" },
-  { id: "openai/gpt-4.1",              label: "GPT-4.1" },
-  { id: "google/gemini-2.5-pro",       label: "Gemini 2.5 Pro" },
-  { id: "deepseek/deepseek-chat-v3.1", label: "DeepSeek V3.1" },
-  { id: "z-ai/glm-4.6",               label: "GLM 4.6" },
-  { id: "qwen/qwen3-coder",            label: "Qwen3 Coder" },
-  { id: "stealth/ox-alpha",            label: "Stealth OX Alpha" },
-  { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (free)" },
-  { id: "meta-llama/llama-3.3-70b-instruct:free", label: "Llama 3.3 70B (free)" },
+  { id: "openai/gpt-4o",            label: "GPT-4o" },
+  { id: "openai/gpt-4o-mini",       label: "GPT-4o Mini" },
+  { id: "anthropic/claude-sonnet-4",label: "Claude Sonnet 4" },
+  { id: "anthropic/claude-haiku-4-5",label: "Claude Haiku 4.5" },
+  { id: "google/gemini-2.5-flash",  label: "Gemini 2.5 Flash" },
+  { id: "google/gemini-2.5-pro",    label: "Gemini 2.5 Pro" },
+  { id: "x-ai/grok-3-mini",         label: "Grok 3 Mini" },
+  { id: "x-ai/grok-3",              label: "Grok 3" },
+  { id: "deepseek/deepseek-r2",     label: "DeepSeek R2" },
+  { id: "stealth/ox-alpha",         label: "Ox Alpha (Stealth)" },
+  { id: "meta-llama/llama-4-maverick", label: "Llama 4 Maverick" },
 ];
 
-export type SettingsTab = "general" | "mcp" | "docker";
-
-export interface SettingsConfig {
-  apiKey: string;
-  model: string;
-  autoApprove: boolean;
-  lang: Lang;
-  customModels: string[];
-}
-
 export interface SettingsModalProps {
-  config: SettingsConfig;
-  initialTab?: SettingsTab;
-  onConfigChange: (patch: Partial<SettingsConfig>) => void;
-  onMcpToolsChange: (tools: McpToolInfo[]) => void;
+  lang: Lang;
+  open: boolean;
+  initialTab?: "general" | "mcp" | "docker";
+  model: string;
+  openrouterKey: string;
+  planMode: boolean;
+  maxTokens: number;
   onClose: () => void;
+  onSaveGeneral: (key: string, model: string, maxTokens: number, planMode: boolean) => void;
 }
 
 export function SettingsModal({
-  config, initialTab = "general", onConfigChange, onMcpToolsChange, onClose,
+  lang, open, initialTab = "general",
+  model, openrouterKey, planMode, maxTokens,
+  onClose, onSaveGeneral,
 }: SettingsModalProps) {
-  const t   = STRINGS[config.lang];
-  const dir = config.lang === "ar" ? "rtl" : "ltr";
+  const t = STRINGS[lang];
+  const [tab, setTab] = useState<"general" | "mcp" | "docker">(initialTab);
+  const [key, setKey] = useState(openrouterKey);
+  const [selectedModel, setSelectedModel] = useState(model);
+  const [customModel, setCustomModel] = useState("");
+  const [maxTok, setMaxTok] = useState(maxTokens);
+  const [localPlan, setLocalPlan] = useState(planMode);
+  const [showKey, setShowKey] = useState(false);
 
-  const [tab,        setTab]        = useState<SettingsTab>(initialTab);
-  const [showKey,    setShowKey]    = useState(false);
-  const [keyStatus,  setKeyStatus]  = useState<"idle" | "testing" | "ok" | "bad">("idle");
-  const [newModel,   setNewModel]   = useState("");
-  const [modelError, setModelError] = useState("");
+  React.useEffect(() => {
+    if (open) {
+      setTab(initialTab);
+      setKey(openrouterKey);
+      setSelectedModel(model);
+      setMaxTok(maxTokens);
+      setLocalPlan(planMode);
+    }
+  }, [open, initialTab]);
 
-  const allModels = [
-    ...MODELS,
-    ...config.customModels.map((id) => ({ id, label: id })),
-  ];
+  if (!open) return null;
 
-  const testKey = useCallback(async () => {
-    if (!config.apiKey.trim()) { setKeyStatus("bad"); return; }
-    setKeyStatus("testing");
-    try {
-      const res = await fetch("https://openrouter.ai/api/v1/key", {
-        headers: { Authorization: `Bearer ${config.apiKey.trim()}` },
-      });
-      setKeyStatus(res.ok ? "ok" : "bad");
-    } catch { setKeyStatus("bad"); }
-  }, [config.apiKey]);
+  const effectiveModel = customModel.trim() || selectedModel;
 
-  const addModel = useCallback(() => {
-    const id = newModel.trim();
-    setModelError("");
-    if (!id) return;
-    if (!/^[a-zA-Z0-9.\-_/:]+$/.test(id)) { setModelError("Invalid model id"); return; }
-    if (allModels.some((m) => m.id === id)) { setModelError("Already in list"); setNewModel(""); return; }
-    onConfigChange({ customModels: [...config.customModels, id], model: id });
-    setNewModel("");
-  }, [newModel, allModels, config, onConfigChange]);
-
-  const removeModel = useCallback((id: string) => {
-    onConfigChange({
-      customModels: config.customModels.filter((m) => m !== id),
-      model: config.model === id ? MODELS[0].id : config.model,
-    });
-  }, [config, onConfigChange]);
+  const TABS = [
+    { id: "general", label: "⚙ General",  icon: "⚙" },
+    { id: "mcp",     label: "🔌 MCP",      icon: "🔌" },
+    { id: "docker",  label: "🐳 Docker",   icon: "🐳" },
+  ] as const;
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div className="settings-card settings-wide" onClick={(e) => e.stopPropagation()} dir={dir}>
-
-        {/* Tab bar */}
-        <div className="settings-tabs">
-          <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>
-            ⚙ {t.tabGeneral}
-          </button>
-          <button className={tab === "mcp"     ? "active" : ""} onClick={() => setTab("mcp")}>
-            🔌 {t.tabMcp}
-          </button>
-          <button className={tab === "docker"  ? "active" : ""} onClick={() => setTab("docker")}>
-            🐳 {t.tabDocker}
-          </button>
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal anim-scale-in">
+        {/* Header */}
+        <div className="modal-header">
+          <span className="modal-title">Settings</span>
+          <button className="modal-close" onClick={onClose}>✕</button>
         </div>
 
-        {/* ── General ── */}
-        {tab === "general" && (
-          <>
-            <div className="settings-title">{t.settings}</div>
+        {/* Tabs */}
+        <div className="modal-tabs">
+          {TABS.map((tb) => (
+            <button
+              key={tb.id}
+              className={`modal-tab ${tab === tb.id ? "active" : ""}`}
+              onClick={() => setTab(tb.id)}
+            >
+              {tb.label}
+            </button>
+          ))}
+        </div>
 
-            {/* API Key */}
-            <div className="field">
-              <label>{t.apiKey}</label>
-              <div className="key-row">
-                <input
-                  type={showKey ? "text" : "password"}
-                  value={config.apiKey}
-                  placeholder="sk-or-v1-..."
-                  dir="ltr"
-                  onChange={(e) => { onConfigChange({ apiKey: e.target.value }); setKeyStatus("idle"); }}
-                />
-                <button className="btn sm ghost" onClick={() => setShowKey((s) => !s)}>
-                  {showKey ? "🙈" : "👁"}
-                </button>
-                <button className="btn sm" onClick={() => void testKey()} disabled={keyStatus === "testing"}>
-                  {keyStatus === "testing" ? "…" : "✓"}
-                </button>
-              </div>
-              {keyStatus === "ok"  && <span className="status ok">✓ Key valid</span>}
-              {keyStatus === "bad" && <span className="status bad">✕ Invalid key or network error</span>}
-            </div>
+        {/* Body */}
+        <div className="modal-body">
 
-            {/* Model select */}
-            <div className="field">
-              <label>{t.model}</label>
-              <select value={config.model} onChange={(e) => onConfigChange({ model: e.target.value })} dir="ltr">
-                {!allModels.some((m) => m.id === config.model) && (
-                  <option value={config.model}>{config.model}</option>
-                )}
-                <optgroup label="Popular">
-                  {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </optgroup>
-                {config.customModels.length > 0 && (
-                  <optgroup label="My models">
-                    {config.customModels.map((id) => <option key={id} value={id}>{id}</option>)}
-                  </optgroup>
-                )}
-              </select>
-            </div>
-
-            {/* Add custom model */}
-            <div className="field">
-              <label>Add custom model <span className="hint-text">(vendor/name from openrouter.ai/models)</span></label>
-              <div className="key-row">
-                <input value={newModel} dir="ltr" placeholder="e.g. mistralai/mistral-large"
-                  onChange={(e) => { setNewModel(e.target.value); setModelError(""); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") addModel(); }} />
-                <button className="btn sm primary" onClick={addModel} disabled={!newModel.trim()}>+</button>
-              </div>
-              {modelError && <span className="status bad">{modelError}</span>}
-              {config.customModels.length > 0 && (
-                <div className="custom-models" dir="ltr">
-                  {config.customModels.map((id) => (
-                    <div key={id} className={`custom-model-row ${id === config.model ? "current" : ""}`}>
-                      <button className="use-model" onClick={() => onConfigChange({ model: id })}>{id}</button>
-                      <button className="remove-model" onClick={() => removeModel(id)}>✕</button>
-                    </div>
-                  ))}
+          {tab === "general" && (
+            <>
+              {/* API Key */}
+              <div className="field">
+                <label className="field-label">OpenRouter API Key</label>
+                <div className="input-row">
+                  <input
+                    className="input mono"
+                    type={showKey ? "text" : "password"}
+                    placeholder="sk-or-..."
+                    value={key}
+                    onChange={(e) => setKey(e.target.value)}
+                    autoComplete="off"
+                  />
+                  <button className="btn icon sm" onClick={() => setShowKey((v) => !v)} title="Toggle visibility">
+                    {showKey ? "🙈" : "👁"}
+                  </button>
                 </div>
-              )}
-            </div>
+                <span className="field-hint">Get your key at openrouter.ai/keys</span>
+              </div>
 
-            {/* Auto-approve */}
-            <label className="check-row">
-              <input type="checkbox" checked={config.autoApprove}
-                onChange={(e) => onConfigChange({ autoApprove: e.target.checked })} />
-              {t.autoApprove}
-            </label>
+              {/* Model selector */}
+              <div className="field">
+                <label className="field-label">Model</label>
+                <select
+                  className="input"
+                  value={selectedModel}
+                  onChange={(e) => { setSelectedModel(e.target.value); setCustomModel(""); }}
+                >
+                  {MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
 
-            <p className="hint">{t.keyHint}</p>
-            <button className="btn primary" onClick={onClose}>OK</button>
-          </>
+              {/* Custom model */}
+              <div className="field">
+                <label className="field-label">Custom model ID <span style={{ opacity: .5 }}>(overrides above)</span></label>
+                <input
+                  className="input mono"
+                  type="text"
+                  placeholder="provider/model-name"
+                  value={customModel}
+                  onChange={(e) => setCustomModel(e.target.value)}
+                />
+              </div>
+
+              {/* Max tokens */}
+              <div className="field">
+                <label className="field-label">Max tokens per request</label>
+                <input
+                  className="input mono"
+                  type="number"
+                  min={256} max={32000} step={256}
+                  value={maxTok}
+                  onChange={(e) => setMaxTok(Number(e.target.value))}
+                />
+                <span className="field-hint">Recommended: 4096 – 16000</span>
+              </div>
+
+              {/* Plan mode */}
+              <div className="toggle-row">
+                <span className="toggle-label">
+                  Plan mode
+                  <span className="field-hint" style={{ display: "block", marginTop: 2 }}>Agent creates a todo plan before executing tasks</span>
+                </span>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={localPlan}
+                    onChange={(e) => setLocalPlan(e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </>
+          )}
+
+          {tab === "mcp" && <McpSettings />}
+          {tab === "docker" && <DockerPanel />}
+        </div>
+
+        {/* Footer */}
+        {tab === "general" && (
+          <div className="modal-footer">
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button
+              className="btn primary"
+              onClick={() => {
+                onSaveGeneral(key.trim(), effectiveModel, maxTok, localPlan);
+                onClose();
+              }}
+            >
+              Save changes
+            </button>
+          </div>
         )}
-
-        {/* ── MCP ── */}
-        {tab === "mcp" && <McpSettings onToolsChange={onMcpToolsChange} />}
-
-        {/* ── Docker ── */}
-        {tab === "docker" && <DockerPanel />}
       </div>
     </div>
   );

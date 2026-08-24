@@ -1,406 +1,332 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { AgentRunner, type AgentMessage, type AgentHooks, type TodoItem, type EditProposal, type PendingQuestion, type SkillInfo, type McpToolMeta } from "./agent";
-import { STRINGS } from "./i18n";
-import { useWorkspace } from "./hooks/useWorkspace";
-import { Sidebar }       from "./components/Sidebar";
-import { ChatHeader }    from "./components/ChatHeader";
-import { ChatThread, type ChatEntry } from "./components/ChatThread";
-import { Composer }      from "./components/Composer";
-import { SettingsModal, type SettingsConfig } from "./components/SettingsModal";
-import type { Session, ChatMessage } from "./types/workspace";
-import type { McpToolInfo } from "./global";
-import type { TokenUsageData } from "./TokenUsage";
-import "./sand/sand.css";
 import "./styles.css";
-import "./styles-p6.css";
 
-// ── Types ──────────────────────────────────────────────────────────────
+import { Sidebar } from "./components/Sidebar";
+import { ChatHeader } from "./components/ChatHeader";
+import { ChatThread } from "./components/ChatThread";
+import { Composer } from "./components/Composer";
+import { SettingsModal } from "./components/SettingsModal";
+import { ActivityPanel, type ActivityItem } from "./components/ActivityPanel";
+
+import { AgentRunner, type SkillInfo, type TodoItem } from "./agent";
+import { STRINGS, type Lang } from "./i18n";
+import { useWorkspace } from "./hooks/useWorkspace";
+import type { ChatMessage } from "./types/workspace";
+
+const DEFAULT_MODELS = [
+  "openai/gpt-4o",
+  "anthropic/claude-sonnet-4",
+  "stealth/ox-alpha",
+];
+
+function toChatMessages(
+  msgs: import("./agent").AgentMessage[]
+): ChatMessage[] {
+  return msgs.map((m) => ({
+    id:        m.id        ?? crypto.randomUUID(),
+    role:      m.role      as ChatMessage["role"],
+    content:   m.content,
+    createdAt: m.createdAt ?? new Date().toISOString(),
+  }));
+}
+
 type LiveSession = {
-  entries:     ChatEntry[];
-  todos:       TodoItem[];
   running:     boolean;
   streaming:   string;
-  history:     AgentMessage[];   // ← fix: was missing, caused history loss on session switch
+  todos:       TodoItem[];
   projectRoot: string | null;
-  tokenUsage:  TokenUsageData;
+  history:     ChatMessage[];
+  activityItems: ActivityItem[];
+  tokenUsage:  { prompt: number; completion: number; cost: number } | null;
 };
 
-// ── Config helpers ──────────────────────────────────────────────────
-function loadConfig(): SettingsConfig {
-  try {
-    const raw = localStorage.getItem("botyar-config-v3");
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<SettingsConfig>;
-      return {
-        apiKey:       p.apiKey ?? "",
-        model:        p.model  ?? "anthropic/claude-sonnet-4.5",
-        autoApprove:  p.autoApprove ?? false,
-        lang:         p.lang === "ar" ? "ar" : "en",
-        customModels: Array.isArray(p.customModels)
-          ? p.customModels.filter((m): m is string => typeof m === "string")
-          : [],
-      };
-    }
-  } catch {}
-  return { apiKey: "", model: "anthropic/claude-sonnet-4.5", autoApprove: false, lang: "en", customModels: [] };
+function makeLive(projectRoot?: string | null): LiveSession {
+  return {
+    running: false, streaming: "",
+    todos: [], projectRoot: projectRoot ?? null,
+    history: [], activityItems: [],
+    tokenUsage: null,
+  };
 }
 
-function emptyLive(projectRoot: string | null = null): LiveSession {
-  return { entries: [], todos: [], running: false, streaming: "", history: [], projectRoot, tokenUsage: { prompt: 0, completion: 0, total: 0 } };
-}
-
-function newId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
-
-function toChatMessages(history: AgentMessage[]): ChatMessage[] {
-  return history.map((m) => {
-    let content = "";
-    if (m.role === "tool") {
-      content = (m as { content: string }).content ?? "";
-    } else if (typeof m.content === "string") {
-      content = m.content ?? "";
-    } else if (m.content == null) {
-      content = "";
-    } else if (Array.isArray(m.content)) {
-      content = (m.content as Array<{ type: string; text?: string }>)
-        .map((p) => (p.type === "text" ? (p.text ?? "") : "[image]"))
-        .join("\n");
-    } else {
-      content = String(m.content);
-    }
-    return { id: newId(), role: m.role as ChatMessage["role"], content, createdAt: Date.now() };
-  });
-}
-
-// ── App ───────────────────────────────────────────────────────────────
 export default function App() {
-  const ws = useWorkspace();
+  /* ── Workspace ── */
+  const {
+    projects, activeProjectId,
+    sessions, activeSessionId,
+    createProject, setActiveProject,
+    createSession,  setActiveSession,
+    deleteSession,  updateSession,
+  } = useWorkspace();
 
-  const [config,       setConfig]       = useState<SettingsConfig>(loadConfig);
-  const [showSettings, setShowSettings] = useState(false);
+  const activeSession = sessions.find((s) => s.id === activeSessionId) ?? sessions[0];
+
+  /* ── Settings ── */
+  const [model,        setModel]        = useState(() => localStorage.getItem("model")        || DEFAULT_MODELS[0]);
+  const [apiKey,       setApiKey]       = useState(() => localStorage.getItem("openrouterKey") || "");
+  const [maxTokens,    setMaxTokens]    = useState(() => Number(localStorage.getItem("maxTokens")) || 8192);
+  const [planMode,     setPlanMode]     = useState(() => localStorage.getItem("planMode") === "true");
+  const [lang,         setLang]         = useState<Lang>(() => (localStorage.getItem("lang") as Lang) || "en");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab,  setSettingsTab]  = useState<"general" | "mcp" | "docker">("general");
-  const [planMode,     setPlanMode]     = useState(true);
-  const [mcpTools,     setMcpTools]     = useState<McpToolInfo[]>([]);
-  const [skills,       setSkills]       = useState<SkillInfo[]>([]);
-  const [treeRefresh,  setTreeRefresh]  = useState(0);
 
-  const [liveSessions, setLiveSessions] = useState<Map<string, LiveSession>>(new Map());
-  const [editApproval, setEditApproval] = useState<{ sessionId: string; proposal: EditProposal; resolve: (d: "approved" | "rejected") => void } | null>(null);
-  const [userQuestion, setUserQuestion] = useState<{ sessionId: string; q: PendingQuestion; resolve: (a: string) => void } | null>(null);
+  /* ── Live state ── */
+  const [liveSessions, setLiveSessions] = useState<Record<string, LiveSession>>({});
 
-  const continueRefs = useRef(new Map<string, boolean>());
-  const runnerRefs   = useRef(new Map<string, AgentRunner>());
-  const composerRef  = useRef<HTMLTextAreaElement>(null);
+  /* ── Skills ── */
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [mcpToolCount, setMcpToolCount] = useState(0);
 
-  // ── Persist config
-  useEffect(() => { localStorage.setItem("botyar-config-v3", JSON.stringify(config)); }, [config]);
+  /* ── Tree refresh ── */
+  const [treeRefresh, setTreeRefresh] = useState(0);
 
-  // ── Load MCP tools on mount
-  useEffect(() => { void window.botyar.mcpListAllTools().then(setMcpTools).catch(() => {}); }, []);
+  const t = STRINGS[lang];
 
-  // ── Skills per project
-  const projectRoot = ws.activeSession
-    ? (liveSessions.get(ws.activeSession.id)?.projectRoot ?? ws.activeProject?.rootPath ?? null)
-    : null;
+  /* ── Runner refs ── */
+  const runnersRef = useRef<Record<string, AgentRunner>>({});
 
-  useEffect(() => {
-    if (projectRoot) void window.botyar.skillsList(projectRoot).then(setSkills).catch(() => setSkills([]));
-    else setSkills([]);
-  }, [projectRoot]);
+  /* ── Helpers ── */
+  const getLive = useCallback((id: string): LiveSession => {
+    return liveSessions[id] ?? makeLive();
+  }, [liveSessions]);
 
-  // ── Keyboard shortcuts
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === ",") { e.preventDefault(); setShowSettings(true); setSettingsTab("general"); }
-      if (e.ctrlKey && e.key === "n") { e.preventDefault(); void createSession(); }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const setLive = useCallback((id: string, patch: Partial<LiveSession>) => {
+    setLiveSessions((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] ?? makeLive()), ...patch },
+    }));
   }, []);
 
-  // ── Live session helpers
-  const getLive = useCallback(
-    (id: string): LiveSession => liveSessions.get(id) ?? emptyLive(),
-    [liveSessions],
-  );
+  /* ── Load skills on project change ── */
+  const projectRoot = getLive(activeSessionId).projectRoot
+    ?? sessions.find((s) => s.id === activeSessionId)?.title
+    ?? null;
 
-  const patchLive = useCallback((id: string, patch: Partial<LiveSession> | ((s: LiveSession) => Partial<LiveSession>)) => {
-    setLiveSessions((prev) => {
-      const current = prev.get(id) ?? emptyLive();
-      const delta   = typeof patch === "function" ? patch(current) : patch;
-      const next    = new Map(prev);
-      next.set(id, { ...current, ...delta });
-      return next;
-    });
-  }, []);
-
-  // ── Derived
-  const active     = ws.activeSession;
-  const activeLive = active ? getLive(active.id) : null;
-  const t          = STRINGS[config.lang];
-  const dir        = config.lang === "ar" ? "rtl" : "ltr";
-
-  const projectSessions = ws.sessions.filter((s) =>
-    ws.activeProject ? s.projectId === ws.activeProject.id : !s.projectId,
-  );
-
-  // ── Sync projectRoot from workspace (fix: use getLive in deps)
   useEffect(() => {
-    if (active && ws.activeProject && !getLive(active.id).projectRoot) {
-      patchLive(active.id, { projectRoot: ws.activeProject.rootPath });
+    const root = getLive(activeSessionId).projectRoot;
+    if (!root) return;
+    window.botyar.listSkills(root)
+      .then(setSkills)
+      .catch(() => setSkills([]));
+  }, [activeSessionId, getLive]);
+
+  /* ── Runner factory ── */
+  function getRunner(sessionId: string): AgentRunner {
+    if (!runnersRef.current[sessionId]) {
+      runnersRef.current[sessionId] = new AgentRunner();
     }
-  }, [active?.id, ws.activeProject?.id, getLive, patchLive]);
+    return runnersRef.current[sessionId];
+  }
 
-  // ── Hooks factory
-  const makeHooks = useCallback((sessionId: string): AgentHooks => ({
-    onAssistantDelta:   (chunk) => patchLive(sessionId, (s) => ({ streaming: s.streaming + chunk })),
-    onAssistantMessage: (text)  => patchLive(sessionId, (s) => ({
-      streaming: "",
-      entries:   text.trim() ? [...s.entries, { kind: "assistant" as const, text }] : s.entries,
-    })),
-    onToolCall:   (name, args) => patchLive(sessionId, (s) => ({
-      entries: [...s.entries, { kind: "tool" as const, name, args, result: "" }],
-    })),
-    onToolResult: (_name, _args, result) => {
-      patchLive(sessionId, (s) => {
-        const entries = [...s.entries];
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const e = entries[i];
-          if (e.kind === "tool" && e.result === "") { entries[i] = { ...e, result }; break; }
-        }
-        return { entries };
-      });
-      if (result.includes("Saved ") && result.includes(" chars to ")) setTreeRefresh((k) => k + 1);
-    },
-    onTodos:        (items)    => patchLive(sessionId, { todos: items }),
-    onEditProposal: ()         => {},
-    waitForEditApproval: (proposal) =>
-      new Promise((resolve) => {
-        patchLive(sessionId, (s) => ({
-          entries: [...s.entries, { kind: "edit" as const, proposal, approved: false }],
-        }));
-        setEditApproval({ sessionId, proposal, resolve: (d) => { resolve(d); setEditApproval(null); } });
-      }),
-    askUser: (q) =>
-      new Promise((resolve) => {
-        setUserQuestion({ sessionId, q, resolve: (a) => { resolve(a); setUserQuestion(null); } });
-      }),
-    shouldContinue: () => continueRefs.current.get(sessionId) === true,
-    onTokenUsage:   (usage) => patchLive(sessionId, { tokenUsage: usage }),
-  }), [patchLive]);
+  /* ── Send message ── */
+  async function handleSend(text: string) {
+    if (!activeSessionId) return;
+    if (getLive(activeSessionId).running) return;
 
-  // ── Send
-  const send = useCallback(async (sessionId: string, text: string, images: string[] = []) => {
-    const session = ws.sessions.find((s) => s.id === sessionId);
-    const live    = getLive(sessionId);
-    if (!text.trim() || !session || live.running) return;
-    if (!config.apiKey) { setShowSettings(true); setSettingsTab("general"); return; }
+    // Skill shortcut
+    if (text.startsWith("/")) {
+      const [cmd, ...rest] = text.slice(1).split(" ");
+      if (cmd === "clear") {
+        setLive(activeSessionId, { history: [], streaming: "", todos: [], activityItems: [] });
+        return;
+      }
+      const skill = skills.find((s) => s.name === cmd);
+      if (skill) {
+        text = `Use skill "${skill.name}": ${skill.description}\n${rest.join(" ")}`;
+      }
+    }
 
-    const title = session.title || text.slice(0, 46);
-    ws.patchSession(sessionId, { title, model: config.model });
-    patchLive(sessionId, (s) => ({
-      entries:   [...s.entries, { kind: "user" as const, text, images: images.length ? images : undefined }],
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(), role: "user",
+      content: text, createdAt: new Date().toISOString(),
+    };
+
+    setLive(activeSessionId, {
+      history:   [...(getLive(activeSessionId).history ?? []), userMsg],
       running:   true,
       streaming: "",
-    }));
+    });
 
-    const root         = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
-    const skillsForRun = await window.botyar.skillsList(root ?? "").catch(() => [] as SkillInfo[]);
-    const mcpForRun    = await window.botyar.mcpListAllTools().catch(() => mcpTools) as McpToolMeta[];
+    // Auto-title first message
+    if (!activeSession?.title) {
+      updateSession(activeSessionId, { title: text.slice(0, 40) });
+    }
 
-    const hooks  = makeHooks(sessionId);
-    const runner = new AgentRunner(
-      { apiKey: config.apiKey, model: config.model },
-      root, planMode, config.autoApprove,
-      hooks, live.history, skillsForRun, mcpForRun,
-    );
-    runnerRefs.current.set(sessionId, runner);
-    continueRefs.current.set(sessionId, true);
-    runner.addUserTurn(text, images);
+    const runner = getRunner(activeSessionId);
+    const live   = getLive(activeSessionId);
 
     try {
-      await runner.run();
-    } catch (error) {
-      patchLive(sessionId, (s) => ({
-        entries: [...s.entries, { kind: "error" as const, text: String(error) }],
-      }));
-    } finally {
-      const history = runner.getHistory();
-      // fix: persist history back into live state so session resume works
-      patchLive(sessionId, { running: false, streaming: "", history });
-      runnerRefs.current.delete(sessionId);
-      setLiveSessions((snap) => {
-        const latest = snap.get(sessionId);
-        if (session) {
-          ws.persistSession({
-            ...session,
-            title,
-            messages:   toChatMessages(history),
-            model:      config.model,
-            tokenUsage: latest?.tokenUsage ?? live.tokenUsage,
-            updatedAt:  Date.now(),
+      await runner.run({
+        messages:    toChatMessages(runner.getHistory()),
+        userMessage: text,
+        model,
+        apiKey,
+        maxTokens,
+        planMode,
+        projectRoot: live.projectRoot ?? undefined,
+        skills,
+        onStream: (chunk) => {
+          setLive(activeSessionId, { streaming: chunk });
+        },
+        onTodos: (todos) => {
+          setLive(activeSessionId, { todos });
+        },
+        onToolCall: (name, arg) => {
+          const item: ActivityItem = {
+            id:     crypto.randomUUID(),
+            type:   name.includes("File") ? "file" : name === "shell" ? "shell" : name.startsWith("web") ? "web" : "tool",
+            name,
+            arg:    typeof arg === "string" ? arg : JSON.stringify(arg).slice(0, 120),
+            status: "running",
+            ts:     Date.now(),
+          };
+          setLive(activeSessionId, {
+            activityItems: [...(getLive(activeSessionId).activityItems ?? []), item],
           });
-        }
-        return snap;
+        },
+        onToolResult: (name, result, ok) => {
+          setLive(activeSessionId, {
+            activityItems: (getLive(activeSessionId).activityItems ?? []).map((i) =>
+              i.name === name && i.status === "running"
+                ? { ...i, status: ok ? "ok" : "err", result: String(result).slice(0, 400) }
+                : i
+            ),
+          });
+          setTreeRefresh((n) => n + 1);
+        },
+        onTokenUsage: (usage) => {
+          setLive(activeSessionId, { tokenUsage: usage });
+        },
       });
+    } finally {
+      const history = toChatMessages(runner.getHistory());
+      setLive(activeSessionId, { running: false, streaming: "", history });
+      updateSession(activeSessionId, { messages: history });
     }
-  }, [ws, config, planMode, makeHooks, patchLive, getLive, mcpTools]);
+  }
 
-  const stop = useCallback((sessionId: string) => {
-    continueRefs.current.set(sessionId, false);
-    runnerRefs.current.get(sessionId)?.stop();
-  }, []);
+  /* ── Stop ── */
+  function handleStop() {
+    if (!activeSessionId) return;
+    runnersRef.current[activeSessionId]?.stop();
+    setLive(activeSessionId, { running: false, streaming: "" });
+  }
 
-  const createSession = useCallback(async () => {
-    const root    = ws.activeProject?.rootPath ?? null;
-    const pid     = ws.activeProject?.id;
-    const session = await ws.createSession(pid);
-    patchLive(session.id, emptyLive(root));
-  }, [ws, patchLive]);
+  /* ── New session ── */
+  function handleNewSession() {
+    const id = createSession();
+    setLive(id, makeLive(projectRoot));
+  }
 
-  const deleteSession = useCallback((id: string) => {
-    stop(id);
-    ws.deleteSession(id);
-  }, [ws, stop]);
+  /* ── Pick folder ── */
+  async function handlePickFolder() {
+    const dir = await window.botyar.pickFolder();
+    if (!dir) return;
+    setLive(activeSessionId, { projectRoot: dir });
+    const sk = await window.botyar.listSkills(dir).catch(() => []);
+    setSkills(sk);
+    setTreeRefresh((n) => n + 1);
+  }
 
-  const pickFolder = useCallback(async () => {
-    const folder = await window.botyar.pickFolder();
-    if (!folder) return;
-    if (!ws.activeProject) {
-      const name    = folder.split(/[\\/]/).pop() ?? "Project";
-      const project = await ws.createProject(name, folder);
-      if (active) patchLive(active.id, { projectRoot: folder });
-      else {
-        const session = await ws.createSession(project.id);
-        patchLive(session.id, emptyLive(folder));
-      }
-    } else {
-      if (active) patchLive(active.id, { projectRoot: folder });
-    }
-  }, [ws, active, patchLive]);
+  /* ── Settings save ── */
+  function handleSaveGeneral(newKey: string, newModel: string, newMaxTok: number, newPlan: boolean) {
+    setApiKey(newKey);   localStorage.setItem("openrouterKey", newKey);
+    setModel(newModel);  localStorage.setItem("model",         newModel);
+    setMaxTokens(newMaxTok); localStorage.setItem("maxTokens",  String(newMaxTok));
+    setPlanMode(newPlan); localStorage.setItem("planMode",     String(newPlan));
+  }
 
-  const openSettings = useCallback((tab: "general" | "mcp" | "docker" = "general") => {
-    setSettingsTab(tab);
-    setShowSettings(true);
-  }, []);
+  const live = getLive(activeSessionId);
 
-  const suggestions = [t.suggestion1, t.suggestion2, t.suggestion3, t.suggestion4];
+  const getLiveForSidebar = useCallback((id: string) => {
+    const l = getLive(id);
+    return { running: l.running, todos: l.todos, projectRoot: l.projectRoot };
+  }, [getLive]);
 
-  // ── Empty landing ───────────────────────────────────────────────────────────
-if (!active) return (
-    <div className="app" dir={dir}>
-      <Sidebar
-        lang={config.lang}
-        projectRoot={null}
-        sessions={[]}
-        activeSessionId=""
-        getLiveSession={() => ({ running: false, todos: [], projectRoot: null })}
-        skills={skills}
-        treeRefresh={treeRefresh}
-        mcpToolCount={mcpTools.length}
-        onNewSession={() => void createSession()}
-        onPickFolder={() => void pickFolder()}
-        onSwitchSession={() => {}}
-        onDeleteSession={() => {}}
-        onOpenSettings={openSettings}
-        onSkillClick={() => { void createSession(); }}
-        onLangToggle={() => setConfig((c) => ({ ...c, lang: c.lang === "en" ? "ar" : "en" }))}
-      />
-      <div className="main" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <button className="btn primary" onClick={() => void createSession()}>{t.newChat}</button>
-      </div>
-    </div>
-  );
-
-  const activeToolCount = activeLive?.entries.filter((e) => e.kind === "tool").length ?? 0;
+  const hasActivity = live.activityItems.length > 0 || live.todos.length > 0 || !!live.tokenUsage;
 
   return (
-    <div className="app" dir={dir}>
+    <div className={`app ${hasActivity ? "" : "no-activity"}`}>
+
       {/* ── Sidebar ── */}
       <Sidebar
-        lang={config.lang}
-        projectRoot={projectRoot}
-        sessions={projectSessions}
-        activeSessionId={active.id}
-        getLiveSession={(id) => {
-          const l = getLive(id);
-          return { running: l.running, todos: l.todos, projectRoot: l.projectRoot };
-        }}
+        lang={lang}
+        projectRoot={live.projectRoot}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        getLiveSession={getLiveForSidebar}
         skills={skills}
         treeRefresh={treeRefresh}
-        mcpToolCount={mcpTools.length}
-        onNewSession={() => void createSession()}
-        onPickFolder={() => void pickFolder()}
-        onSwitchSession={(id) => ws.switchSession(id)}
+        mcpToolCount={mcpToolCount}
+        onNewSession={handleNewSession}
+        onPickFolder={handlePickFolder}
+        onSwitchSession={(id) => { setActiveSession(id); }}
         onDeleteSession={deleteSession}
-        onOpenSettings={openSettings}
-        onSkillClick={(name) => {
-          const el = composerRef.current as HTMLTextAreaElement & { insertText?: (t: string) => void } | null;
-          el?.insertText?.(`/${name} `);
+        onOpenSettings={(tab) => { setSettingsTab(tab ?? "general"); setSettingsOpen(true); }}
+        onSkillClick={(name) => { /* insert slash cmd into composer */ }}
+        onLangToggle={() => {
+          const next = lang === "en" ? "ar" : "en";
+          setLang(next); localStorage.setItem("lang", next);
         }}
-        onLangToggle={() => setConfig((c) => ({ ...c, lang: c.lang === "en" ? "ar" : "en" }))}
       />
 
-      <div className="main">
-        {showSettings && (
-          <SettingsModal
-            config={config}
-            initialTab={settingsTab}
-            onConfigChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
-            onMcpToolsChange={setMcpTools}
-            onClose={() => setShowSettings(false)}
-          />
-        )}
-
+      {/* ── Main column ── */}
+      <main className="main">
         <ChatHeader
-          lang={config.lang}
-          model={config.model}
-          customModels={config.customModels}
+          lang={lang}
+          model={model}
+          projectRoot={live.projectRoot}
+          running={live.running}
           planMode={planMode}
-          running={activeLive?.running ?? false}
-          activeToolCount={activeToolCount}
-          mcpToolCount={mcpTools.length}
-          tokenUsage={activeLive?.tokenUsage ?? { prompt: 0, completion: 0, total: 0 }}
-          onModelChange={(id) => setConfig((c) => ({ ...c, model: id }))}
-          onPlanModeToggle={setPlanMode}
-          onOpenSettings={openSettings}
+          tokenUsage={live.tokenUsage}
+          onTogglePlanMode={() => {
+            const next = !planMode;
+            setPlanMode(next); localStorage.setItem("planMode", String(next));
+          }}
+          onOpenSettings={(tab) => { setSettingsTab(tab ?? "general"); setSettingsOpen(true); }}
+          onPickFolder={handlePickFolder}
+          onStop={handleStop}
         />
 
         <ChatThread
-          lang={config.lang}
-          entries={activeLive?.entries ?? []}
-          todos={activeLive?.todos ?? []}
-          streaming={activeLive?.streaming ?? ""}
-          running={activeLive?.running ?? false}
-          skills={skills}
-          suggestions={suggestions}
-          editApproval={
-            editApproval && editApproval.sessionId === active.id
-              ? { proposal: editApproval.proposal, resolve: editApproval.resolve }
-              : null
-          }
-          userQuestion={
-            userQuestion && userQuestion.sessionId === active.id
-              ? { q: userQuestion.q, resolve: userQuestion.resolve }
-              : null
-          }
-          onSuggestionClick={(s) => void send(active.id, s)}
-          onSkillClick={(name) => {
-            const el = composerRef.current as HTMLTextAreaElement & { insertText?: (t: string) => void } | null;
-            el?.insertText?.(`/${name} `);
-          }}
+          lang={lang}
+          messages={live.history}
+          streaming={live.streaming}
+          running={live.running}
+          onSuggestionClick={handleSend}
         />
 
         <Composer
-          lang={config.lang}
-          model={config.model}
-          planMode={planMode}
-          running={activeLive?.running ?? false}
+          lang={lang}
+          running={live.running}
           skills={skills}
-          onSend={(text, images) => void send(active.id, text, images)}
-          onStop={() => stop(active.id)}
+          onSend={handleSend}
+          onStop={handleStop}
         />
-      </div>
+      </main>
+
+      {/* ── Activity Panel ── */}
+      {hasActivity && (
+        <ActivityPanel
+          items={live.activityItems}
+          todos={live.todos}
+          tokenUsage={live.tokenUsage}
+          contextLimit={maxTokens}
+        />
+      )}
+
+      {/* ── Settings modal ── */}
+      <SettingsModal
+        lang={lang}
+        open={settingsOpen}
+        initialTab={settingsTab}
+        model={model}
+        openrouterKey={apiKey}
+        planMode={planMode}
+        maxTokens={maxTokens}
+        onClose={() => setSettingsOpen(false)}
+        onSaveGeneral={handleSaveGeneral}
+      />
     </div>
   );
 }
