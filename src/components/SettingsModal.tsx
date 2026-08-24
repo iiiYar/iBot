@@ -12,6 +12,7 @@ const MODELS = [
   { id: "deepseek/deepseek-chat-v3.1", label: "DeepSeek V3.1" },
   { id: "z-ai/glm-4.6",               label: "GLM 4.6" },
   { id: "qwen/qwen3-coder",            label: "Qwen3 Coder" },
+  { id: "stealth/ox-alpha",            label: "Stealth OX Alpha" },
   { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (free)" },
   { id: "meta-llama/llama-3.3-70b-instruct:free", label: "Llama 3.3 70B (free)" },
 ];
