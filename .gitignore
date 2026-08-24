@@ -1,0 +1,7 @@
+node_modules/
+dist-renderer/
+.cache/
+.build/
+dist/
+*.log
+.env

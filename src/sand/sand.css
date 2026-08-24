@@ -1,0 +1,55 @@
+/*
+ * sand design-system utilities — extracted verbatim from the shipped
+ * Grok Bot 0.18.0 renderer stylesheet (index-lCyB53CO.css).
+ * Values are byte-faithful; the `:not(#\#)` specificity guards are dropped
+ * because Bot Yar has no competing definitions for these classes.
+ */
+
+:root {
+  --cursor-spacing-1: 4px;
+  --cursor-spacing-2: 8px;
+  --cursor-spacing-3: 12px;
+  --cursor-spacing-4: 16px;
+  --cursor-spacing-5: 20px;
+  --cursor-spacing-6: 24px;
+  --cursor-spacing-7: 28px;
+  --cursor-spacing-8: 32px;
+  --cursor-spacing-9: 36px;
+  --cursor-spacing-10: 40px;
+  --cursor-spacing-11: 44px;
+  --cursor-spacing-12: 48px;
+}
+
+/* layout utilities */
+.sand-78zum5 { display: flex; }
+.sand-dt5ytf { flex-direction: column; }
+.sand-1cy8zhl { align-items: flex-start; }
+.sand-11twubx { gap: var(--cursor-spacing-1); }
+.sand-h8yej3 { width: 100%; }
+.sand-euugli { min-width: 0; }
+.sand-qcrz7y { align-self: flex-start; }
+
+/* transcript message width rails (verbatim) */
+.sand-145rt9f { max-width: min(76%, 420px, calc(100% - 82px)); }
+.sand-1vyvmim { max-width: min(76%, 460px, calc(100% - 82px)); }
+.sand-1ed8p9w { max-width: min(88%, 520px, calc(100% - 82px)); }
+.sand-1q8iv8g { max-width: min(88%, 640px, calc(100% - 82px)); }
+
+/* group spacing (verbatim) */
+.sand-19snzy6 { margin-top: var(--cursor-spacing-3); }
+.sand-1sl1sun { margin-top: 0; }
+
+/* user-role alignment override (verbatim selector intent) */
+.sand-1jy3azn { align-self: flex-end; }
+
+/*
+ * Base card skin. The shipped renderer styles .sand-message-card through
+ * compound selectors in the immutable chunk; this is the resolved dark-theme
+ * result as rendered (chrome #141414 surface family, 12px radius).
+ */
+.sand-message-card {
+  background: #1e1e1e;
+  border: 1px solid rgba(240, 240, 240, 0.10);
+  border-radius: var(--cursor-radius-xl, 12px);
+  overflow: hidden;
+}
