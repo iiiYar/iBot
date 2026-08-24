@@ -1,0 +1,125 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════╗
+ * ║  iBot Design System — Tokens v1.0                               ║
+ * ║  Liquid Glass · Dark Matter · August 2026                       ║
+ * ╚══════════════════════════════════════════════════════════════════╝
+ */
+
+:root {
+  /* ── Color Palette ───────────────────────────────────────────────── */
+  --hue-base:   250;          /* violet-indigo base */
+  --hue-accent: 262;
+
+  /* Raw scales */
+  --gray-950:  #08080f;
+  --gray-900:  #0e0e1a;
+  --gray-850:  #12121f;
+  --gray-800:  #17172a;
+  --gray-750:  #1c1c30;
+  --gray-700:  #232338;
+  --gray-600:  #30304d;
+  --gray-500:  #4a4a6a;
+  --gray-400:  #7070a0;
+  --gray-300:  #9898c0;
+  --gray-200:  #c0c0d8;
+  --gray-100:  #e4e4f0;
+  --gray-50:   #f4f4fa;
+
+  --violet-600: #7c3aed;
+  --violet-500: #8b5cf6;
+  --violet-400: #a78bfa;
+  --violet-300: #c4b5fd;
+  --violet-200: #ddd6fe;
+
+  --blue-500:  #3b82f6;
+  --blue-400:  #60a5fa;
+  --green-500: #10b981;
+  --green-400: #34d399;
+  --amber-500: #f59e0b;
+  --amber-400: #fbbf24;
+  --red-500:   #ef4444;
+  --red-400:   #f87171;
+
+  /* ── Semantic Surface Tokens ─────────────────────────────────────── */
+  --surface-base:     #08080f;          /* deepest background */
+  --surface-1:        rgba(14,14,26,.92);
+  --surface-2:        rgba(20,20,38,.88);
+  --surface-3:        rgba(28,28,50,.80);
+  --surface-raised:   rgba(35,35,60,.95);
+  --surface-overlay:  rgba(8,8,15,.75);
+
+  /* ── Glass Tokens ────────────────────────────────────────────────── */
+  --glass-bg:           rgba(255,255,255,.04);
+  --glass-bg-hover:     rgba(255,255,255,.07);
+  --glass-bg-active:    rgba(255,255,255,.10);
+  --glass-border:       rgba(255,255,255,.09);
+  --glass-border-hover: rgba(255,255,255,.16);
+  --glass-border-focus: rgba(139,92,246,.50);
+  --glass-blur:         blur(20px) saturate(180%);
+  --glass-blur-heavy:   blur(40px) saturate(200%);
+
+  /* ── Glow & Accent ───────────────────────────────────────────────── */
+  --accent:             var(--violet-500);
+  --accent-dim:         var(--violet-400);
+  --accent-glow:        0 0 20px rgba(139,92,246,.35), 0 0 60px rgba(139,92,246,.12);
+  --accent-glow-sm:     0 0 10px rgba(139,92,246,.25);
+  --accent-bg:          rgba(139,92,246,.12);
+  --accent-bg-hover:    rgba(139,92,246,.20);
+
+  /* ── Text ────────────────────────────────────────────────────────── */
+  --text-primary:   #eeeef5;
+  --text-secondary: #a0a0c0;
+  --text-muted:     #606080;
+  --text-disabled:  #404060;
+  --text-accent:    var(--violet-300);
+  --text-code:      #c9d1d9;
+
+  /* ── Border ──────────────────────────────────────────────────────── */
+  --border:         rgba(255,255,255,.08);
+  --border-strong:  rgba(255,255,255,.14);
+  --border-accent:  rgba(139,92,246,.40);
+  --border-error:   rgba(239,68,68,.40);
+  --border-success: rgba(16,185,129,.40);
+
+  /* ── Shadows ─────────────────────────────────────────────────────── */
+  --shadow-sm:   0 1px 3px rgba(0,0,0,.4),  0 1px 2px rgba(0,0,0,.3);
+  --shadow-md:   0 4px 12px rgba(0,0,0,.5), 0 2px 4px rgba(0,0,0,.3);
+  --shadow-lg:   0 10px 30px rgba(0,0,0,.6),0 4px 8px rgba(0,0,0,.3);
+  --shadow-xl:   0 20px 60px rgba(0,0,0,.7),0 8px 16px rgba(0,0,0,.4);
+  --shadow-glass:0 8px 32px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
+
+  /* ── Radius ──────────────────────────────────────────────────────── */
+  --radius-xs:  4px;
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  14px;
+  --radius-xl:  20px;
+  --radius-2xl: 28px;
+  --radius-full: 9999px;
+
+  /* ── Spacing ─────────────────────────────────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Layout ──────────────────────────────────────────────────────── */
+  --sidebar-width:       220px;
+  --sidebar-collapsed:   52px;
+  --activity-width:      300px;
+  --header-height:       52px;
+  --composer-min-height: 56px;
+
+  /* ── Z-Index ─────────────────────────────────────────────────────── */
+  --z-base:    0;
+  --z-raised:  10;
+  --z-sticky:  100;
+  --z-overlay: 200;
+  --z-modal:   300;
+  --z-toast:   400;
+}
