@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AgentRunner, type AgentMessage, type AgentHooks, type TodoItem, type EditProposal, type PendingQuestion, type SkillInfo } from "./agent";
 import { TranscriptCardFrame } from "./sand/TranscriptCardFrame";
 import { STRINGS, type Lang } from "./i18n";
+import { useWorkspace } from "./hooks/useWorkspace";
+import type { Session } from "./types/workspace";
 import "./sand/sand.css";
 
 type ChatEntry =
@@ -13,17 +15,15 @@ type ChatEntry =
 
 type TreeNode = { name: string; type: "dir" | "file"; size: number };
 
-type SessionData = {
-  id: string;
-  title: string;
-  projectRoot: string | null;
-  createdAt: number;
-  updatedAt: number;
-  history: AgentMessage[];
-  entries: ChatEntry[];
-  todos: TodoItem[];
-  running: boolean;
+/** Extended session held only in-memory during a run */
+type LiveSession = Session & {
+  entries:   ChatEntry[];
+  todos:     TodoItem[];
+  running:   boolean;
   streaming: string;
+  // Legacy compat — maps to messages[0].content for agent history
+  history:   AgentMessage[];
+  projectRoot: string | null;
 };
 
 type AppConfig = { apiKey: string; model: string; autoApprove: boolean; lang: Lang; customModels: string[] };
@@ -46,8 +46,23 @@ const TOOL_ICONS: Record<string, string> = {
 
 function newId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
 
-function freshSession(projectRoot: string | null = null): SessionData {
-  return { id: newId(), title: "", projectRoot, createdAt: Date.now(), updatedAt: Date.now(), history: [], entries: [], todos: [], running: false, streaming: "" };
+function freshLive(projectRoot: string | null = null, projectId: string | null = null, model = MODELS[0].id): LiveSession {
+  return {
+    id: newId(),
+    projectId,
+    title: "",
+    model,
+    messages: [],
+    tokenUsage: { prompt: 0, completion: 0, total: 0 },
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    entries: [],
+    todos: [],
+    running: false,
+    streaming: "",
+    history: [],
+    projectRoot,
+  };
 }
 
 function loadConfig(): AppConfig {
@@ -260,6 +275,8 @@ function QuestionCard({ question, options, onAnswer, sendLabel }: {
 }
 
 export default function App() {
+  const ws = useWorkspace();
+
   const [config, setConfig] = useState<AppConfig>(loadConfig);
   const [showSettings, setShowSettings] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -269,8 +286,10 @@ export default function App() {
   const [planMode, setPlanMode] = useState(true);
   const [sidebarView, setSidebarView] = useState<"sessions" | "files" | "todos">("sessions");
   const [input, setInput] = useState("");
-  const [sessions, setSessions] = useState<SessionData[]>(() => [freshSession()]);
-  const [activeId, setActiveId] = useState<string>(() => "");
+
+  // In-memory live state for UI (entries, todos, running, streaming)
+  const [liveSessions, setLiveSessions] = useState<Map<string, Omit<LiveSession, keyof Session>>>(new Map());
+
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -282,34 +301,41 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
+  // ── Helpers ─────────────────────────────────────────────────────
+  const getLive = useCallback((id: string): Omit<LiveSession, keyof Session> => {
+    return liveSessions.get(id) ?? { entries: [], todos: [], running: false, streaming: "", history: [], projectRoot: null };
+  }, [liveSessions]);
+
+  const patchLive = useCallback((id: string, patch: Partial<Omit<LiveSession, keyof Session>> | ((s: Omit<LiveSession, keyof Session>) => Partial<Omit<LiveSession, keyof Session>>)) => {
+    setLiveSessions((prev) => {
+      const current = prev.get(id) ?? { entries: [], todos: [], running: false, streaming: "", history: [], projectRoot: null };
+      const delta = typeof patch === "function" ? patch(current) : patch;
+      const next = new Map(prev);
+      next.set(id, { ...current, ...delta });
+      return next;
+    });
+  }, []);
+
+  const active = ws.activeSession;
+  const activeLive = active ? getLive(active.id) : null;
   const t = STRINGS[config.lang];
   const dir = config.lang === "ar" ? "rtl" : "ltr";
   const allModels = useMemo(() => [...MODELS, ...config.customModels.map((id) => ({ id, label: id }))], [config.customModels]);
   const modelLabel = allModels.find((m) => m.id === config.model)?.label ?? config.model;
+  const projectRoot = activeLive?.projectRoot ?? ws.activeProject?.rootPath ?? null;
 
-  const patchSession = useCallback((id: string, patch: Partial<SessionData> | ((s: SessionData) => Partial<SessionData>)) => {
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...(typeof patch === "function" ? patch(s) : patch), updatedAt: Date.now() } : s)));
-  }, []);
-
+  // Sync project root from active session when switching
   useEffect(() => {
-    if (!activeId && sessions[0]) setActiveId(sessions[0].id);
-  }, [activeId, sessions]);
+    if (active && ws.activeProject && !getLive(active.id).projectRoot) {
+      patchLive(active.id, { projectRoot: ws.activeProject.rootPath });
+    }
+  }, [active?.id, ws.activeProject?.id]);
 
   useEffect(() => { localStorage.setItem("botyar-config-v3", JSON.stringify(config)); }, [config]);
 
   useEffect(() => {
-    void window.botyar.sessionsList().then((loaded) => {
-      const parsed = (loaded as SessionData[]).filter((s) => s && typeof s.id === "string" && Array.isArray(s.entries));
-      if (parsed.length > 0) {
-        setSessions(parsed.map((s) => ({ ...s, running: false, streaming: "" })));
-      }
-    }).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (active?.projectRoot) void window.botyar.skillsList(active.projectRoot).then(setSkills).catch(() => setSkills([]));
-  }, [active?.projectRoot]);
+    if (projectRoot) void window.botyar.skillsList(projectRoot).then(setSkills).catch(() => setSkills([]));
+  }, [projectRoot]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -352,25 +378,17 @@ export default function App() {
     setConfig((c) => ({ ...c, customModels: c.customModels.filter((m) => m !== id), model: c.model === id ? MODELS[0].id : c.model }));
   }, []);
 
-  const saveSession = useCallback((session: SessionData) => {
-    void window.botyar.sessionsSave({
-      id: session.id, title: session.title, projectRoot: session.projectRoot,
-      createdAt: session.createdAt, updatedAt: session.updatedAt,
-      history: session.history, entries: session.entries, todos: session.todos,
-    }).catch(() => {});
-  }, []);
-
   const makeHooks = useCallback((sessionId: string): AgentHooks => ({
-    onAssistantDelta: (chunk) => patchSession(sessionId, (s) => ({ streaming: s.streaming + chunk })),
+    onAssistantDelta: (chunk) => patchLive(sessionId, (s) => ({ streaming: s.streaming + chunk })),
     onAssistantMessage: (text) => {
-      patchSession(sessionId, (s) => ({
+      patchLive(sessionId, (s) => ({
         streaming: "",
         entries: text.trim() ? [...s.entries, { kind: "assistant" as const, text }] : s.entries,
       }));
     },
-    onToolCall: (name, args) => patchSession(sessionId, (s) => ({ entries: [...s.entries, { kind: "tool" as const, name, args, result: "" }] })),
+    onToolCall: (name, args) => patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "tool" as const, name, args, result: "" }] })),
     onToolResult: (_name, _args, result) => {
-      patchSession(sessionId, (s) => {
+      patchLive(sessionId, (s) => {
         const entries = [...s.entries];
         for (let i = entries.length - 1; i >= 0; i--) {
           const entry = entries[i];
@@ -380,11 +398,11 @@ export default function App() {
       });
       if (result.includes("Saved ") && result.includes(" chars to ")) setTreeRefresh((k) => k + 1);
     },
-    onTodos: (items) => patchSession(sessionId, { todos: items }),
+    onTodos: (items) => patchLive(sessionId, { todos: items }),
     onEditProposal: () => {},
     waitForEditApproval: (proposal) =>
       new Promise((resolve) => {
-        patchSession(sessionId, (s) => ({ entries: [...s.entries, { kind: "edit" as const, proposal, approved: false }] }));
+        patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "edit" as const, proposal, approved: false }] }));
         setEditApproval({ sessionId, proposal, resolve: (d) => { resolve(d); setEditApproval(null); } });
       }),
     askUser: (q) =>
@@ -392,30 +410,37 @@ export default function App() {
         setUserQuestion({ sessionId, q, resolve: (a) => { resolve(a); setUserQuestion(null); } });
       }),
     shouldContinue: () => continueRefs.current.get(sessionId) === true,
-  }), [patchSession]);
+  }), [patchLive]);
 
   const continueRefs = useRef(new Map<string, boolean>());
-  const runnerRefs = useRef(new Map<string, AgentRunner>());
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const runnerRefs  = useRef(new Map<string, AgentRunner>());
+  const bottomRef   = useRef<HTMLDivElement>(null);
 
   const send = useCallback(async (sessionId: string, overrideText?: string, images: string[] = []) => {
-    const session = sessions.find((s) => s.id === sessionId);
-    const text = (overrideText ?? input).trim();
-    if (!text || !session || session.running) return;
+    const session = ws.sessions.find((s) => s.id === sessionId);
+    const live    = getLive(sessionId);
+    const text    = (overrideText ?? input).trim();
+    if (!text || !session || live.running) return;
     if (!config.apiKey) { setShowSettings(true); return; }
 
-    setSessions((prev) => prev.map((s) => s.id === sessionId
-      ? { ...s, entries: [...s.entries, { kind: "user" as const, text, images: images.length ? images : undefined }], running: true, streaming: "", title: s.title || text.slice(0, 46), updatedAt: Date.now() }
-      : s));
+    const title = session.title || text.slice(0, 46);
+    ws.patchSession(sessionId, { title, model: config.model });
+    patchLive(sessionId, (s) => ({
+      entries:  [...s.entries, { kind: "user" as const, text, images: images.length ? images : undefined }],
+      running:  true,
+      streaming: "",
+    }));
+    if (input === (overrideText ?? input)) setInput("");
 
-    const skillsForRun = await window.botyar.skillsList(session.projectRoot ?? "").catch(() => []);
+    const root = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
+    const skillsForRun = await window.botyar.skillsList(root ?? "").catch(() => []);
     const runner = new AgentRunner(
       { apiKey: config.apiKey, model: config.model },
-      session.projectRoot,
+      root,
       planMode,
       config.autoApprove,
       makeHooks(sessionId),
-      session.history,
+      live.history,
       skillsForRun,
     );
     runnerRefs.current.set(sessionId, runner);
@@ -425,43 +450,55 @@ export default function App() {
     try {
       await runner.run();
     } catch (error) {
-      patchSession(sessionId, (s) => ({ entries: [...s.entries, { kind: "error" as const, text: String(error) }] }));
+      patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "error" as const, text: String(error) }] }));
     } finally {
-      patchSession(sessionId, { running: false, streaming: "" });
+      patchLive(sessionId, { running: false, streaming: "" });
       runnerRefs.current.delete(sessionId);
-      const updated = sessionsRef.current.find((s) => s.id === sessionId);
-      if (updated) saveSession(updated);
+      const updatedLive = liveSessions.get(sessionId);
+      if (updatedLive && session) {
+        ws.persistSession({
+          ...session, title,
+          messages: updatedLive.history,
+          model: config.model,
+          tokenUsage: session.tokenUsage,
+          updatedAt: Date.now(),
+        });
+      }
     }
-  }, [input, sessions, config, planMode, makeHooks, patchSession, saveSession]);
-
-  const sessionsRef = useRef(sessions);
-  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  }, [input, ws, config, planMode, makeHooks, patchLive, getLive, liveSessions]);
 
   const stop = useCallback((sessionId: string) => {
     continueRefs.current.set(sessionId, false);
     runnerRefs.current.get(sessionId)?.stop();
   }, []);
 
-  const createSession = useCallback(() => {
-    const s = freshSession(active?.projectRoot ?? null);
-    setSessions((prev) => [s, ...prev]);
-    setActiveId(s.id);
-  }, [active?.projectRoot]);
+  const createSession = useCallback(async () => {
+    const root = ws.activeProject?.rootPath ?? null;
+    const pid  = ws.activeProject?.id ?? undefined;
+    const session = await ws.createSession(pid);
+    patchLive(session.id, { projectRoot: root, entries: [], todos: [], history: [] });
+  }, [ws, patchLive]);
 
   const deleteSession = useCallback((id: string) => {
-    void window.botyar.sessionsDelete(id);
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (next.length === 0) { const fresh = freshSession(); setActiveId(fresh.id); return [fresh]; }
-      if (id === activeId) setActiveId(next[0].id);
-      return next;
-    });
-  }, [activeId]);
+    stop(id);
+    ws.deleteSession(id);
+  }, [ws, stop]);
 
   const pickFolder = useCallback(async () => {
     const folder = await window.botyar.pickFolder();
-    if (folder && active) patchSession(active.id, { projectRoot: folder });
-  }, [active, patchSession]);
+    if (!folder) return;
+    if (!ws.activeProject) {
+      const name = folder.split(/[\\/]/).pop() ?? "Project";
+      const project = await ws.createProject(name, folder);
+      if (active) patchLive(active.id, { projectRoot: folder });
+      if (!active) {
+        const session = await ws.createSession(project.id);
+        patchLive(session.id, { projectRoot: folder });
+      }
+    } else {
+      if (active) patchLive(active.id, { projectRoot: folder });
+    }
+  }, [ws, active, patchLive]);
 
   const addImagesFromFiles = useCallback((files: FileList | File[]) => {
     for (const file of Array.from(files)) {
@@ -472,13 +509,33 @@ export default function App() {
     }
   }, []);
 
-  const slashQuery = active && input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
-  const slashMatches = slashQuery !== null ? skills.filter((s) => s.name.toLowerCase().startsWith(slashQuery)) : [];
+  const slashQuery    = active && input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
+  const slashMatches  = slashQuery !== null ? skills.filter((s) => s.name.toLowerCase().startsWith(slashQuery)) : [];
+  const activeToolCount = activeLive?.entries.filter((e) => e.kind === "tool").length ?? 0;
+  const suggestions   = [t.suggestion1, t.suggestion2, t.suggestion3, t.suggestion4];
 
-  const activeToolCount = active?.entries.filter((e) => e.kind === "tool").length ?? 0;
-  const suggestions = [t.suggestion1, t.suggestion2, t.suggestion3, t.suggestion4];
+  const projectSessions = ws.sessions.filter((s) =>
+    ws.activeProject ? s.projectId === ws.activeProject.id : !s.projectId
+  );
 
-  if (!active) return null;
+  if (!active) return (
+    <div className="app" dir={dir}>
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <div className="brand"><span className="logo">◈</span><span className="name">{t.appName}</span></div>
+          <button className="icon-btn" title={t.settings} onClick={() => setShowSettings(true)}>⚙</button>
+        </div>
+        <button className="new-chat-btn" onClick={() => void createSession()}><span className="plus">+</span> {t.newChat}</button>
+        <button className="project-chip" onClick={() => void pickFolder()} title={t.pickFolder}>
+          <span className="folder-icon">📁</span>
+          <span className="project-name">{t.noFolder}</span>
+        </button>
+      </aside>
+      <div className="main" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <button className="btn primary" onClick={() => void createSession()}>{t.newChat}</button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="app" dir={dir}>
@@ -488,11 +545,11 @@ export default function App() {
           <button className="icon-btn" title={t.settings} onClick={() => setShowSettings(true)}>⚙</button>
         </div>
 
-        <button className="new-chat-btn" onClick={createSession}><span className="plus">+</span> {t.newChat}</button>
+        <button className="new-chat-btn" onClick={() => void createSession()}><span className="plus">+</span> {t.newChat}</button>
 
-        <button className="project-chip" onClick={pickFolder} title={active.projectRoot ?? t.pickFolder}>
+        <button className="project-chip" onClick={() => void pickFolder()} title={projectRoot ?? t.pickFolder}>
           <span className="folder-icon">📁</span>
-          <span className="project-name">{active.projectRoot ? active.projectRoot.split(/[\\/]/).pop() : t.noFolder}</span>
+          <span className="project-name">{projectRoot ? projectRoot.split(/[\\/]/).pop() : t.noFolder}</span>
         </button>
 
         <div className="sidebar-section">
@@ -500,30 +557,33 @@ export default function App() {
             <button className={sidebarView === "sessions" ? "active" : ""} onClick={() => setSidebarView("sessions")}>{t.sessions}</button>
             <button className={sidebarView === "files" ? "active" : ""} onClick={() => setSidebarView("files")}>{t.files}</button>
             <button className={sidebarView === "todos" ? "active" : ""} onClick={() => setSidebarView("todos")}>
-              {t.todos}{active.todos.some((x) => x.status === "in_progress") && <span className="pulse-dot" />}
+              {t.todos}{activeLive?.todos.some((x) => x.status === "in_progress") && <span className="pulse-dot" />}
             </button>
           </div>
           <div className="sidebar-content">
             {sidebarView === "sessions" && (
               <div className="sessions-panel">
-                {sessions.map((s) => (
-                  <div key={s.id} className={`session-row ${s.id === activeId ? "active" : ""}`} onClick={() => setActiveId(s.id)}>
-                    <div className="session-main">
-                      <div className="session-title">{s.running && <span className="pulse-dot" />} {s.title || t.newChat}</div>
-                      <div className="session-sub" dir="auto">{s.projectRoot ? s.projectRoot.split(/[\\/]/).pop() : t.noFolder}</div>
+                {projectSessions.map((s) => {
+                  const live = getLive(s.id);
+                  return (
+                    <div key={s.id} className={`session-row ${s.id === active.id ? "active" : ""}`} onClick={() => ws.switchSession(s.id)}>
+                      <div className="session-main">
+                        <div className="session-title">{live.running && <span className="pulse-dot" />} {s.title || t.newChat}</div>
+                        <div className="session-sub" dir="auto">{live.projectRoot ? live.projectRoot.split(/[\\/]/).pop() : t.noFolder}</div>
+                      </div>
+                      <button className="session-delete" title="✕" onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}>✕</button>
                     </div>
-                    <button className="session-delete" title="✕" onClick={(e) => { e.stopPropagation(); stop(s.id); deleteSession(s.id); }}>✕</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
-            {sidebarView === "files" && (active.projectRoot
-              ? <FileTree root={active.projectRoot} refreshKey={treeRefresh} emptyText={t.noFiles} />
+            {sidebarView === "files" && (projectRoot
+              ? <FileTree root={projectRoot} refreshKey={treeRefresh} emptyText={t.noFiles} />
               : <div className="sidebar-empty">{t.emptyProject}</div>)}
             {sidebarView === "todos" && (
               <div className="todos-panel">
-                {active.todos.length === 0 && <div className="sidebar-empty">{t.noTodos}</div>}
-                {active.todos.map((td) => (
+                {(activeLive?.todos.length ?? 0) === 0 && <div className="sidebar-empty">{t.noTodos}</div>}
+                {activeLive?.todos.map((td) => (
                   <div key={td.id} className={`todo-item ${td.status}`}>
                     <span className="todo-check">
                       {td.status === "completed" ? "✓" : td.status === "in_progress" ? "●" : td.status === "cancelled" ? "×" : "○"}
@@ -616,11 +676,11 @@ export default function App() {
             <span>📋 {t.planMode}</span>
           </label>
           <div className="spacer" />
-          {active.running && <span className="running-indicator"><span className="pulse-dot" /> {activeToolCount}</span>}
+          {activeLive?.running && <span className="running-indicator"><span className="pulse-dot" /> {activeToolCount}</span>}
         </header>
 
         <main className="chat">
-          {active.entries.length === 0 && !active.streaming ? (
+          {(activeLive?.entries.length ?? 0) === 0 && !activeLive?.streaming ? (
             <div className="welcome">
               <div className="welcome-logo">◈</div>
               <h1>{t.welcomeTitle}</h1>
@@ -644,7 +704,7 @@ export default function App() {
             </div>
           ) : (
             <div className="thread">
-              {active.entries.map((entry, i) => {
+              {activeLive?.entries.map((entry, i) => {
                 if (entry.kind === "user")
                   return (
                     <div key={i} className="msg user">
@@ -665,10 +725,10 @@ export default function App() {
                 return <div key={i} className="msg"><ToolCard name={entry.name} args={entry.args} result={entry.result} icon={TOOL_ICONS[entry.name] ?? "🔧"} /></div>;
               })}
 
-              {active.todos.length > 0 && (
+              {(activeLive?.todos.length ?? 0) > 0 && (
                 <div className="msg">
                   <div className="todos-card">
-                    {active.todos.map((td) => (
+                    {activeLive?.todos.map((td) => (
                       <div key={td.id} className={`todo-line ${td.status}`}>
                         <span className="todo-check">
                           {td.status === "completed" ? "✓" : td.status === "in_progress" ? "●" : td.status === "cancelled" ? "×" : "○"}
@@ -695,8 +755,8 @@ export default function App() {
                 </div>
               )}
 
-              {active.streaming && <div className="msg assistant"><div className="md streaming">{renderMarkdown(active.streaming)}</div></div>}
-              {active.running && !active.streaming && <div className="thinking"><span /><span /><span /></div>}
+              {activeLive?.streaming && <div className="msg assistant"><div className="md streaming">{renderMarkdown(activeLive.streaming)}</div></div>}
+              {activeLive?.running && !activeLive?.streaming && <div className="thinking"><span /><span /><span /></div>}
               <div ref={bottomRef} />
             </div>
           )}
@@ -743,7 +803,7 @@ export default function App() {
                 const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
                 if (files.length > 0) { e.preventDefault(); addImagesFromFiles(files); }
               }}
-              disabled={active.running}
+              disabled={activeLive?.running}
               rows={1}
             />
             <div className="composer-bar">
@@ -754,7 +814,7 @@ export default function App() {
                 <span className="mini-chip" dir="ltr">{modelLabel}</span>
                 {planMode && <span className="mini-chip accent">📋 {t.planMode}</span>}
               </div>
-              {active.running
+              {activeLive?.running
                 ? <button className="send-btn stop" onClick={() => stop(active.id)} title={t.stop}>■</button>
                 : <button className="send-btn" onClick={() => { void send(active.id, undefined, attachedImages); setAttachedImages([]); setSlashOpen(false); }} disabled={!input.trim()} title={t.send}>↑</button>}
             </div>
