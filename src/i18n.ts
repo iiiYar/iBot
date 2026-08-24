@@ -35,6 +35,16 @@ export const STRINGS = {
     saved: "Saved",
     step: "Step",
     sessions: "Agents",
+    // Phase 5
+    tabGeneral: "General",
+    tabMcp: "MCP",
+    tabDocker: "Docker",
+    mcpServers: "MCP Servers",
+    mcpActive: "active tools",
+    dockerPanel: "Docker",
+    tokens: "tokens",
+    tokensPrompt: "in",
+    tokensCompletion: "out",
   },
   ar: {
     appName: "بوت يار",
@@ -70,6 +80,16 @@ export const STRINGS = {
     saved: "تم الحفظ",
     step: "خطوة",
     sessions: "الوكلاء",
+    // Phase 5
+    tabGeneral: "عام",
+    tabMcp: "MCP",
+    tabDocker: "Docker",
+    mcpServers: "سيرفرات MCP",
+    mcpActive: "أداة نشطة",
+    dockerPanel: "Docker",
+    tokens: "رمز",
+    tokensPrompt: "دخل",
+    tokensCompletion: "خرج",
   },
 } as const;
 
