@@ -72,6 +72,18 @@ const IPC = Object.freeze({
     delete: "sessions:delete",
   },
 
+  // ── MCP (Phase 3) ────────────────────────────────────────────────
+  mcp: {
+    listServers:  "mcp:listServers",
+    saveServer:   "mcp:saveServer",
+    deleteServer: "mcp:deleteServer",
+    connect:      "mcp:connect",
+    disconnect:   "mcp:disconnect",
+    listTools:    "mcp:listTools",
+    listAllTools: "mcp:listAllTools",
+    callTool:     "mcp:callTool",
+  },
+
   // ── Docker (Phase 4) ─────────────────────────────────────────────
   docker: {
     status: "docker:status",

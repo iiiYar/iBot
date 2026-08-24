@@ -45,4 +45,14 @@ contextBridge.exposeInMainWorld("botyar", {
   sessionsGet:    (id) => ipcRenderer.invoke(IPC.sessions.get, id),
   sessionsSave:   (session) => ipcRenderer.invoke(IPC.sessions.save, session),
   sessionsDelete: (id) => ipcRenderer.invoke(IPC.sessions.delete, id),
+
+  // ── MCP (Phase 3) ───────────────────────────────────────────────
+  mcpListServers:  ()                          => ipcRenderer.invoke(IPC.mcp.listServers),
+  mcpSaveServer:   (input)                     => ipcRenderer.invoke(IPC.mcp.saveServer,   input),
+  mcpDeleteServer: (id)                        => ipcRenderer.invoke(IPC.mcp.deleteServer, id),
+  mcpConnect:      (id)                        => ipcRenderer.invoke(IPC.mcp.connect,      id),
+  mcpDisconnect:   (id)                        => ipcRenderer.invoke(IPC.mcp.disconnect,   id),
+  mcpListTools:    (id)                        => ipcRenderer.invoke(IPC.mcp.listTools,    id),
+  mcpListAllTools: ()                          => ipcRenderer.invoke(IPC.mcp.listAllTools),
+  mcpCallTool:     (serverId, name, args)      => ipcRenderer.invoke(IPC.mcp.callTool, serverId, name, args),
 });

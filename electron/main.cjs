@@ -10,6 +10,7 @@ const { createWindowState }   = require("./window-state.cjs");
 const { createSecretStore }   = require("./secret-store.cjs");
 const { createProjectStore }  = require("./project-store.cjs");
 const { createSessionStore }  = require("./session-store.cjs");
+const { createMcpManager }    = require("./mcp-manager.cjs");
 const { IPC }                 = require("./ipc-contract.cjs");
 
 // ── Singletons ────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ let windowState = null;
 let secrets     = null;
 let projects    = null;
 let sessions    = null;
+let mcp         = null;
 let mainWindow  = null;
 
 // ── Window ────────────────────────────────────────────────────────
@@ -121,6 +123,7 @@ app.whenReady().then(() => {
   secrets     = createSecretStore(app);
   projects    = createProjectStore(app);
   sessions    = createSessionStore(app);
+  mcp         = createMcpManager(app);
 
   // ── Dialog & Shell ──────────────────────────────────────────────
   ipcMain.handle(IPC.dialog.pickFolder, async () => {
@@ -379,6 +382,16 @@ app.whenReady().then(() => {
   });
   ipcMain.handle(IPC.sessions.delete, (_e, id) => sessions.delete(id));
 
+  // ── MCP (Phase 3) ────────────────────────────────────────────────
+  ipcMain.handle(IPC.mcp.listServers,  ()                         => mcp.listServers());
+  ipcMain.handle(IPC.mcp.saveServer,   (_e, input)                => mcp.saveServer(input));
+  ipcMain.handle(IPC.mcp.deleteServer, (_e, id)                   => mcp.deleteServer(id));
+  ipcMain.handle(IPC.mcp.connect,      (_e, id)                   => mcp.connect(id));
+  ipcMain.handle(IPC.mcp.disconnect,   (_e, id)                   => mcp.disconnect(id));
+  ipcMain.handle(IPC.mcp.listTools,    (_e, id)                   => mcp.listTools(id));
+  ipcMain.handle(IPC.mcp.listAllTools, ()                         => mcp.listAllTools());
+  ipcMain.handle(IPC.mcp.callTool,     (_e, serverId, name, args) => mcp.callTool(serverId, name, args));
+
   // ── Launch ───────────────────────────────────────────────────────
   createWindow();
 
@@ -389,4 +402,8 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  mcp?.closeAll();
 });
