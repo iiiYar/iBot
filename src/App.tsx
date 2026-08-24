@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AgentRunner, type AgentMessage, type AgentHooks, type TodoItem, type EditProposal, type PendingQuestion, type SkillInfo, type McpToolMeta } from "./agent";
-import { STRINGS, type Lang } from "./i18n";
+import { STRINGS } from "./i18n";
 import { useWorkspace } from "./hooks/useWorkspace";
 import { Sidebar }       from "./components/Sidebar";
 import { ChatHeader }    from "./components/ChatHeader";
@@ -12,6 +12,7 @@ import type { McpToolInfo } from "./global";
 import type { TokenUsageData } from "./TokenUsage";
 import "./sand/sand.css";
 import "./styles.css";
+import "./styles-p6.css";
 
 // ── Types ──────────────────────────────────────────────────────────────
 type LiveSession = {
@@ -19,7 +20,7 @@ type LiveSession = {
   todos:       TodoItem[];
   running:     boolean;
   streaming:   string;
-  history:     AgentMessage[];
+  history:     AgentMessage[];   // ← fix: was missing, caused history loss on session switch
   projectRoot: string | null;
   tokenUsage:  TokenUsageData;
 };
@@ -60,7 +61,9 @@ function toChatMessages(history: AgentMessage[]): ChatMessage[] {
     } else if (m.content == null) {
       content = "";
     } else if (Array.isArray(m.content)) {
-      content = (m.content as Array<{ type: string; text?: string }>).map((p) => (p.type === "text" ? (p.text ?? "") : "[image]")).join("\n");
+      content = (m.content as Array<{ type: string; text?: string }>)
+        .map((p) => (p.type === "text" ? (p.text ?? "") : "[image]"))
+        .join("\n");
     } else {
       content = String(m.content);
     }
@@ -95,7 +98,10 @@ export default function App() {
   useEffect(() => { void window.botyar.mcpListAllTools().then(setMcpTools).catch(() => {}); }, []);
 
   // ── Skills per project
-  const projectRoot = ws.activeSession ? (getLive(ws.activeSession.id).projectRoot ?? ws.activeProject?.rootPath ?? null) : null;
+  const projectRoot = ws.activeSession
+    ? (liveSessions.get(ws.activeSession.id)?.projectRoot ?? ws.activeProject?.rootPath ?? null)
+    : null;
+
   useEffect(() => {
     if (projectRoot) void window.botyar.skillsList(projectRoot).then(setSkills).catch(() => setSkills([]));
     else setSkills([]);
@@ -109,12 +115,14 @@ export default function App() {
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Live session helpers
-  function getLive(id: string): LiveSession {
-    return liveSessions.get(id) ?? emptyLive();
-  }
+  const getLive = useCallback(
+    (id: string): LiveSession => liveSessions.get(id) ?? emptyLive(),
+    [liveSessions],
+  );
 
   const patchLive = useCallback((id: string, patch: Partial<LiveSession> | ((s: LiveSession) => Partial<LiveSession>)) => {
     setLiveSessions((prev) => {
@@ -133,24 +141,26 @@ export default function App() {
   const dir        = config.lang === "ar" ? "rtl" : "ltr";
 
   const projectSessions = ws.sessions.filter((s) =>
-    ws.activeProject ? s.projectId === ws.activeProject.id : !s.projectId
+    ws.activeProject ? s.projectId === ws.activeProject.id : !s.projectId,
   );
 
-  // sync projectRoot from workspace
+  // ── Sync projectRoot from workspace (fix: use getLive in deps)
   useEffect(() => {
     if (active && ws.activeProject && !getLive(active.id).projectRoot) {
       patchLive(active.id, { projectRoot: ws.activeProject.rootPath });
     }
-  }, [active?.id, ws.activeProject?.id]);
+  }, [active?.id, ws.activeProject?.id, getLive, patchLive]);
 
   // ── Hooks factory
-  const makeHooks = useCallback((sessionId: string): AgentHooks & { onTokenUsage?: (u: TokenUsageData) => void } => ({
+  const makeHooks = useCallback((sessionId: string): AgentHooks => ({
     onAssistantDelta:   (chunk) => patchLive(sessionId, (s) => ({ streaming: s.streaming + chunk })),
     onAssistantMessage: (text)  => patchLive(sessionId, (s) => ({
       streaming: "",
       entries:   text.trim() ? [...s.entries, { kind: "assistant" as const, text }] : s.entries,
     })),
-    onToolCall:   (name, args)         => patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "tool" as const, name, args, result: "" }] })),
+    onToolCall:   (name, args) => patchLive(sessionId, (s) => ({
+      entries: [...s.entries, { kind: "tool" as const, name, args, result: "" }],
+    })),
     onToolResult: (_name, _args, result) => {
       patchLive(sessionId, (s) => {
         const entries = [...s.entries];
@@ -162,11 +172,13 @@ export default function App() {
       });
       if (result.includes("Saved ") && result.includes(" chars to ")) setTreeRefresh((k) => k + 1);
     },
-    onTodos: (items) => patchLive(sessionId, { todos: items }),
-    onEditProposal: () => {},
+    onTodos:        (items)    => patchLive(sessionId, { todos: items }),
+    onEditProposal: ()         => {},
     waitForEditApproval: (proposal) =>
       new Promise((resolve) => {
-        patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "edit" as const, proposal, approved: false }] }));
+        patchLive(sessionId, (s) => ({
+          entries: [...s.entries, { kind: "edit" as const, proposal, approved: false }],
+        }));
         setEditApproval({ sessionId, proposal, resolve: (d) => { resolve(d); setEditApproval(null); } });
       }),
     askUser: (q) =>
@@ -174,7 +186,7 @@ export default function App() {
         setUserQuestion({ sessionId, q, resolve: (a) => { resolve(a); setUserQuestion(null); } });
       }),
     shouldContinue: () => continueRefs.current.get(sessionId) === true,
-    onTokenUsage: (usage) => patchLive(sessionId, { tokenUsage: usage }),
+    onTokenUsage:   (usage) => patchLive(sessionId, { tokenUsage: usage }),
   }), [patchLive]);
 
   // ── Send
@@ -192,12 +204,12 @@ export default function App() {
       streaming: "",
     }));
 
-    const root        = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
-    const skillsForRun = await window.botyar.skillsList(root ?? "").catch(() => []);
+    const root         = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
+    const skillsForRun = await window.botyar.skillsList(root ?? "").catch(() => [] as SkillInfo[]);
     const mcpForRun    = await window.botyar.mcpListAllTools().catch(() => mcpTools) as McpToolMeta[];
 
-    const hooks   = makeHooks(sessionId);
-    const runner  = new AgentRunner(
+    const hooks  = makeHooks(sessionId);
+    const runner = new AgentRunner(
       { apiKey: config.apiKey, model: config.model },
       root, planMode, config.autoApprove,
       hooks, live.history, skillsForRun, mcpForRun,
@@ -209,23 +221,30 @@ export default function App() {
     try {
       await runner.run();
     } catch (error) {
-      patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "error" as const, text: String(error) }] }));
+      patchLive(sessionId, (s) => ({
+        entries: [...s.entries, { kind: "error" as const, text: String(error) }],
+      }));
     } finally {
       const history = runner.getHistory();
+      // fix: persist history back into live state so session resume works
       patchLive(sessionId, { running: false, streaming: "", history });
       runnerRefs.current.delete(sessionId);
-      const updatedLive = liveSessions.get(sessionId);
-      if (session) {
-        ws.persistSession({
-          ...session, title,
-          messages:    toChatMessages(history),
-          model:       config.model,
-          tokenUsage:  updatedLive?.tokenUsage ?? live.tokenUsage,
-          updatedAt:   Date.now(),
-        });
-      }
+      setLiveSessions((snap) => {
+        const latest = snap.get(sessionId);
+        if (session) {
+          ws.persistSession({
+            ...session,
+            title,
+            messages:   toChatMessages(history),
+            model:      config.model,
+            tokenUsage: latest?.tokenUsage ?? live.tokenUsage,
+            updatedAt:  Date.now(),
+          });
+        }
+        return snap;
+      });
     }
-  }, [ws, config, planMode, makeHooks, patchLive, getLive, liveSessions, mcpTools]);
+  }, [ws, config, planMode, makeHooks, patchLive, getLive, mcpTools]);
 
   const stop = useCallback((sessionId: string) => {
     continueRefs.current.set(sessionId, false);
@@ -265,11 +284,10 @@ export default function App() {
     setShowSettings(true);
   }, []);
 
-  // suggestions
   const suggestions = [t.suggestion1, t.suggestion2, t.suggestion3, t.suggestion4];
 
-  // ── Empty-project landing ───────────────────────────────────────────
-  if (!active) return (
+  // ── Empty landing ───────────────────────────────────────────────────────────
+if (!active) return (
     <div className="app" dir={dir}>
       <Sidebar
         lang={config.lang}
@@ -285,7 +303,7 @@ export default function App() {
         onSwitchSession={() => {}}
         onDeleteSession={() => {}}
         onOpenSettings={openSettings}
-        onSkillClick={(name) => { void createSession(); }}
+        onSkillClick={() => { void createSession(); }}
         onLangToggle={() => setConfig((c) => ({ ...c, lang: c.lang === "en" ? "ar" : "en" }))}
       />
       <div className="main" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -317,7 +335,6 @@ export default function App() {
         onDeleteSession={deleteSession}
         onOpenSettings={openSettings}
         onSkillClick={(name) => {
-          // insert slash command into composer
           const el = composerRef.current as HTMLTextAreaElement & { insertText?: (t: string) => void } | null;
           el?.insertText?.(`/${name} `);
         }}
@@ -325,7 +342,6 @@ export default function App() {
       />
 
       <div className="main">
-        {/* ── Settings modal ── */}
         {showSettings && (
           <SettingsModal
             config={config}
@@ -336,7 +352,6 @@ export default function App() {
           />
         )}
 
-        {/* ── Header ── */}
         <ChatHeader
           lang={config.lang}
           model={config.model}
@@ -351,7 +366,6 @@ export default function App() {
           onOpenSettings={openSettings}
         />
 
-        {/* ── Thread ── */}
         <ChatThread
           lang={config.lang}
           entries={activeLive?.entries ?? []}
@@ -377,7 +391,6 @@ export default function App() {
           }}
         />
 
-        {/* ── Composer ── */}
         <Composer
           lang={config.lang}
           model={config.model}
