@@ -83,7 +83,7 @@ function MessageBubble({ msg, lang }: { msg: ChatMessage; lang: Lang }) {
       </div>
       <div className={`msg-bubble ${
         isUser ? "msg-bubble-user" : "msg-bubble-bot"
-      } ${msg.role === "error" ? "msg-bubble-error" : ""}`}
+      }`}
         dir="auto"
       >
         {msg.content.split("\n").map((line, i) => (

@@ -109,7 +109,7 @@ export function Composer({ lang, running, skills, onSend, onStop }: ComposerProp
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKey}
-          placeholder={running ? t.running : t.placeholder}
+          placeholder={running ? t.thinking : t.inputPlaceholder}
           disabled={false}
           rows={1}
           dir="auto"
