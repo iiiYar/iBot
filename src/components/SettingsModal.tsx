@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import type { Lang } from "../i18n";
 import { STRINGS } from "../i18n";
-import { McpSettings } from "../McpSettings";
+import McpSettings from "../McpSettings";
 import { DockerPanel } from "../DockerPanel";
 
 const MODELS = [
