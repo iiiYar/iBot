@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AgentRunner, type AgentMessage, type AgentHooks, type TodoItem, type EditProposal, type PendingQuestion, type SkillInfo } from "./agent";
+import { AgentRunner, type AgentMessage, type AgentHooks, type TodoItem, type EditProposal, type PendingQuestion, type SkillInfo, type McpToolMeta } from "./agent";
 import { TranscriptCardFrame } from "./sand/TranscriptCardFrame";
 import { STRINGS, type Lang } from "./i18n";
 import { useWorkspace } from "./hooks/useWorkspace";
+import { McpSettings } from "./McpSettings";
+import { DockerPanel } from "./DockerPanel";
 import type { Session } from "./types/workspace";
+import type { McpToolInfo } from "./global";
 import "./sand/sand.css";
 
 type ChatEntry =
@@ -21,10 +24,11 @@ type LiveSession = Session & {
   todos:     TodoItem[];
   running:   boolean;
   streaming: string;
-  // Legacy compat — maps to messages[0].content for agent history
   history:   AgentMessage[];
   projectRoot: string | null;
 };
+
+type SettingsTab = "general" | "mcp" | "docker";
 
 type AppConfig = { apiKey: string; model: string; autoApprove: boolean; lang: Lang; customModels: string[] };
 
@@ -277,29 +281,36 @@ function QuestionCard({ question, options, onAnswer, sendLabel }: {
 export default function App() {
   const ws = useWorkspace();
 
-  const [config, setConfig] = useState<AppConfig>(loadConfig);
+  const [config, setConfig]           = useState<AppConfig>(loadConfig);
   const [showSettings, setShowSettings] = useState(false);
-  const [showKey, setShowKey] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<"idle" | "testing" | "ok" | "bad">("idle");
-  const [newModel, setNewModel] = useState("");
-  const [modelError, setModelError] = useState("");
-  const [planMode, setPlanMode] = useState(true);
-  const [sidebarView, setSidebarView] = useState<"sessions" | "files" | "todos">("sessions");
-  const [input, setInput] = useState("");
+  const [settingsTab, setSettingsTab]  = useState<SettingsTab>("general");
+  const [showKey, setShowKey]          = useState(false);
+  const [keyStatus, setKeyStatus]      = useState<"idle" | "testing" | "ok" | "bad">("idle");
+  const [newModel, setNewModel]        = useState("");
+  const [modelError, setModelError]    = useState("");
+  const [planMode, setPlanMode]        = useState(true);
+  const [sidebarView, setSidebarView]  = useState<"sessions" | "files" | "todos">("sessions");
+  const [input, setInput]              = useState("");
 
-  // In-memory live state for UI (entries, todos, running, streaming)
+  // MCP tools available to the agent (updated whenever servers connect/disconnect)
+  const [mcpTools, setMcpTools] = useState<McpToolInfo[]>([]);
+
   const [liveSessions, setLiveSessions] = useState<Map<string, Omit<LiveSession, keyof Session>>>(new Map());
-
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skills, setSkills]             = useState<SkillInfo[]>([]);
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
-  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashOpen, setSlashOpen]       = useState(false);
   const [editApproval, setEditApproval] = useState<{ sessionId: string; proposal: EditProposal; resolve: (d: "approved" | "rejected") => void } | null>(null);
   const [userQuestion, setUserQuestion] = useState<{ sessionId: string; q: PendingQuestion; resolve: (a: string) => void } | null>(null);
-  const [treeRefresh, setTreeRefresh] = useState(0);
+  const [treeRefresh, setTreeRefresh]   = useState(0);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const modelMenuRef  = useRef<HTMLDivElement>(null);
+  const textareaRef   = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef  = useRef<HTMLInputElement>(null);
+
+  // Load initial MCP tools on mount
+  useEffect(() => {
+    void window.botyar.mcpListAllTools().then(setMcpTools).catch(() => {});
+  }, []);
 
   // ── Helpers ─────────────────────────────────────────────────────
   const getLive = useCallback((id: string): Omit<LiveSession, keyof Session> => {
@@ -316,15 +327,14 @@ export default function App() {
     });
   }, []);
 
-  const active = ws.activeSession;
-  const activeLive = active ? getLive(active.id) : null;
-  const t = STRINGS[config.lang];
-  const dir = config.lang === "ar" ? "rtl" : "ltr";
-  const allModels = useMemo(() => [...MODELS, ...config.customModels.map((id) => ({ id, label: id }))], [config.customModels]);
-  const modelLabel = allModels.find((m) => m.id === config.model)?.label ?? config.model;
+  const active      = ws.activeSession;
+  const activeLive  = active ? getLive(active.id) : null;
+  const t           = STRINGS[config.lang];
+  const dir         = config.lang === "ar" ? "rtl" : "ltr";
+  const allModels   = useMemo(() => [...MODELS, ...config.customModels.map((id) => ({ id, label: id }))], [config.customModels]);
+  const modelLabel  = allModels.find((m) => m.id === config.model)?.label ?? config.model;
   const projectRoot = activeLive?.projectRoot ?? ws.activeProject?.rootPath ?? null;
 
-  // Sync project root from active session when switching
   useEffect(() => {
     if (active && ws.activeProject && !getLive(active.id).projectRoot) {
       patchLive(active.id, { projectRoot: ws.activeProject.rootPath });
@@ -413,8 +423,8 @@ export default function App() {
   }), [patchLive]);
 
   const continueRefs = useRef(new Map<string, boolean>());
-  const runnerRefs  = useRef(new Map<string, AgentRunner>());
-  const bottomRef   = useRef<HTMLDivElement>(null);
+  const runnerRefs   = useRef(new Map<string, AgentRunner>());
+  const bottomRef    = useRef<HTMLDivElement>(null);
 
   const send = useCallback(async (sessionId: string, overrideText?: string, images: string[] = []) => {
     const session = ws.sessions.find((s) => s.id === sessionId);
@@ -432,8 +442,11 @@ export default function App() {
     }));
     if (input === (overrideText ?? input)) setInput("");
 
-    const root = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
+    const root         = live.projectRoot ?? ws.activeProject?.rootPath ?? null;
     const skillsForRun = await window.botyar.skillsList(root ?? "").catch(() => []);
+    // Snapshot current MCP tools for this run
+    const mcpForRun    = await window.botyar.mcpListAllTools().catch(() => mcpTools) as McpToolMeta[];
+
     const runner = new AgentRunner(
       { apiKey: config.apiKey, model: config.model },
       root,
@@ -442,6 +455,7 @@ export default function App() {
       makeHooks(sessionId),
       live.history,
       skillsForRun,
+      mcpForRun,          // ← Phase 4A: MCP tools wired in
     );
     runnerRefs.current.set(sessionId, runner);
     continueRefs.current.set(sessionId, true);
@@ -465,7 +479,7 @@ export default function App() {
         });
       }
     }
-  }, [input, ws, config, planMode, makeHooks, patchLive, getLive, liveSessions]);
+  }, [input, ws, config, planMode, makeHooks, patchLive, getLive, liveSessions, mcpTools]);
 
   const stop = useCallback((sessionId: string) => {
     continueRefs.current.set(sessionId, false);
@@ -604,53 +618,75 @@ export default function App() {
       <div className="main">
         {showSettings && (
           <div className="settings-overlay" onClick={() => setShowSettings(false)}>
-            <div className="settings-card" onClick={(e) => e.stopPropagation()} dir={dir}>
-              <div className="settings-title">{t.settings}</div>
-              <div className="field">
-                <label>{t.apiKey}</label>
-                <div className="key-row">
-                  <input type={showKey ? "text" : "password"} value={config.apiKey} placeholder="sk-or-v1-..." dir="ltr"
-                    onChange={(e) => { setConfig((c) => ({ ...c, apiKey: e.target.value })); setKeyStatus("idle"); }} />
-                  <button className="btn sm ghost" onClick={() => setShowKey((s) => !s)}>{showKey ? "🙈" : "👁"}</button>
-                  <button className="btn sm" onClick={() => void testKey()} disabled={keyStatus === "testing"}>{keyStatus === "testing" ? "…" : "✓"}</button>
-                </div>
-                {keyStatus === "ok" && <span className="status ok">✓ Key valid</span>}
-                {keyStatus === "bad" && <span className="status bad">✕ Invalid key or network error</span>}
+            <div className="settings-card settings-wide" onClick={(e) => e.stopPropagation()} dir={dir}>
+              {/* ─ Tab bar ─ */}
+              <div className="settings-tabs">
+                <button className={settingsTab === "general" ? "active" : ""} onClick={() => setSettingsTab("general")}>⚙ General</button>
+                <button className={settingsTab === "mcp" ? "active" : ""}     onClick={() => setSettingsTab("mcp")}>🔌 MCP</button>
+                <button className={settingsTab === "docker" ? "active" : ""} onClick={() => setSettingsTab("docker")}>🐳 Docker</button>
               </div>
-              <div className="field">
-                <label>{t.model}</label>
-                <select value={config.model} onChange={(e) => setConfig((c) => ({ ...c, model: e.target.value }))} dir="ltr">
-                  {!allModels.some((m) => m.id === config.model) && <option value={config.model}>{config.model}</option>}
-                  {MODELS.length > 0 && <optgroup label="Popular">{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</optgroup>}
-                  {config.customModels.length > 0 && <optgroup label="My models">{config.customModels.map((id) => <option key={id} value={id}>{id}</option>)}</optgroup>}
-                </select>
-              </div>
-              <div className="field">
-                <label>Add custom model (vendor/name from openrouter.ai/models)</label>
-                <div className="key-row">
-                  <input value={newModel} dir="ltr" placeholder="e.g. mistralai/mistral-large"
-                    onChange={(e) => { setNewModel(e.target.value); setModelError(""); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") addModel(); }} />
-                  <button className="btn sm primary" onClick={addModel} disabled={!newModel.trim()}>+</button>
-                </div>
-                {modelError && <span className="status bad">{modelError}</span>}
-                {config.customModels.length > 0 && (
-                  <div className="custom-models" dir="ltr">
-                    {config.customModels.map((id) => (
-                      <div key={id} className={`custom-model-row ${id === config.model ? "current" : ""}`}>
-                        <button className="use-model" onClick={() => setConfig((c) => ({ ...c, model: id }))}>{id}</button>
-                        <button className="remove-model" onClick={() => removeModel(id)}>✕</button>
-                      </div>
-                    ))}
+
+              {/* ─ General tab ─ */}
+              {settingsTab === "general" && (
+                <>
+                  <div className="settings-title">{t.settings}</div>
+                  <div className="field">
+                    <label>{t.apiKey}</label>
+                    <div className="key-row">
+                      <input type={showKey ? "text" : "password"} value={config.apiKey} placeholder="sk-or-v1-..." dir="ltr"
+                        onChange={(e) => { setConfig((c) => ({ ...c, apiKey: e.target.value })); setKeyStatus("idle"); }} />
+                      <button className="btn sm ghost" onClick={() => setShowKey((s) => !s)}>{showKey ? "🙈" : "👁"}</button>
+                      <button className="btn sm" onClick={() => void testKey()} disabled={keyStatus === "testing"}>{keyStatus === "testing" ? "…" : "✓"}</button>
+                    </div>
+                    {keyStatus === "ok" && <span className="status ok">✓ Key valid</span>}
+                    {keyStatus === "bad" && <span className="status bad">✕ Invalid key or network error</span>}
                   </div>
-                )}
-              </div>
-              <label className="check-row">
-                <input type="checkbox" checked={config.autoApprove} onChange={(e) => setConfig((c) => ({ ...c, autoApprove: e.target.checked }))} />
-                {t.autoApprove}
-              </label>
-              <p className="hint">{t.keyHint}</p>
-              <button className="btn primary" onClick={() => setShowSettings(false)}>OK</button>
+                  <div className="field">
+                    <label>{t.model}</label>
+                    <select value={config.model} onChange={(e) => setConfig((c) => ({ ...c, model: e.target.value }))} dir="ltr">
+                      {!allModels.some((m) => m.id === config.model) && <option value={config.model}>{config.model}</option>}
+                      {MODELS.length > 0 && <optgroup label="Popular">{MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</optgroup>}
+                      {config.customModels.length > 0 && <optgroup label="My models">{config.customModels.map((id) => <option key={id} value={id}>{id}</option>)}</optgroup>}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Add custom model (vendor/name from openrouter.ai/models)</label>
+                    <div className="key-row">
+                      <input value={newModel} dir="ltr" placeholder="e.g. mistralai/mistral-large"
+                        onChange={(e) => { setNewModel(e.target.value); setModelError(""); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") addModel(); }} />
+                      <button className="btn sm primary" onClick={addModel} disabled={!newModel.trim()}>+</button>
+                    </div>
+                    {modelError && <span className="status bad">{modelError}</span>}
+                    {config.customModels.length > 0 && (
+                      <div className="custom-models" dir="ltr">
+                        {config.customModels.map((id) => (
+                          <div key={id} className={`custom-model-row ${id === config.model ? "current" : ""}`}>
+                            <button className="use-model" onClick={() => setConfig((c) => ({ ...c, model: id }))}>{id}</button>
+                            <button className="remove-model" onClick={() => removeModel(id)}>✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <label className="check-row">
+                    <input type="checkbox" checked={config.autoApprove} onChange={(e) => setConfig((c) => ({ ...c, autoApprove: e.target.checked }))} />
+                    {t.autoApprove}
+                  </label>
+                  <p className="hint">{t.keyHint}</p>
+                  <button className="btn primary" onClick={() => setShowSettings(false)}>OK</button>
+                </>
+              )}
+
+              {/* ─ MCP tab ─ */}
+              {settingsTab === "mcp" && (
+                <McpSettings onToolsChange={setMcpTools} />
+              )}
+
+              {/* ─ Docker tab ─ */}
+              {settingsTab === "docker" && (
+                <DockerPanel />
+              )}
             </div>
           </div>
         )}
@@ -667,7 +703,7 @@ export default function App() {
                     onClick={() => { setConfig((c) => ({ ...c, model: m.id })); setModelMenuOpen(false); }}>{m.label}</button>
                 ))}
                 <div className="menu-divider" />
-                <button className="menu-action" onClick={() => { setModelMenuOpen(false); setShowSettings(true); }}>⚙ Manage models…</button>
+                <button className="menu-action" onClick={() => { setModelMenuOpen(false); setShowSettings(true); setSettingsTab("general"); }}>⚙ Manage models…</button>
               </div>
             )}
           </div>
@@ -675,6 +711,12 @@ export default function App() {
             <input type="checkbox" checked={planMode} onChange={(e) => setPlanMode(e.target.checked)} />
             <span>📋 {t.planMode}</span>
           </label>
+          {mcpTools.length > 0 && (
+            <button className="chip-btn mcp-badge" title={`${mcpTools.length} MCP tools active`}
+              onClick={() => { setShowSettings(true); setSettingsTab("mcp"); }}>
+              🔌 {mcpTools.length}
+            </button>
+          )}
           <div className="spacer" />
           {activeLive?.running && <span className="running-indicator"><span className="pulse-dot" /> {activeToolCount}</span>}
         </header>
