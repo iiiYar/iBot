@@ -1,3 +1,15 @@
+// ── MCP tool metadata ────────────────────────────────────────────────────────
+export type McpToolMeta = {
+  /** Namespaced name exposed to the LLM, e.g. "mcp_a1b2c3d4_read_file" */
+  name: string;
+  /** Original tool name on the MCP server */
+  originalName: string;
+  /** UUID of the MCP server that owns this tool */
+  serverId: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
 export type ToolDefinition = {
   type: "function";
   function: {
@@ -10,7 +22,7 @@ export type ToolDefinition = {
 export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
 export type TodoItem = { id: string; content: string; status: TodoStatus };
 
-export const TOOLS: ToolDefinition[] = [
+export const STATIC_TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
@@ -197,6 +209,27 @@ export const TOOLS: ToolDefinition[] = [
   },
 ];
 
+/** @deprecated Use STATIC_TOOLS. Kept for any external import that still references TOOLS. */
+export const TOOLS = STATIC_TOOLS;
+
+/**
+ * Merge static tools with live MCP tools into the array sent to the LLM.
+ * Ensures no duplicate names (MCP wins on collision).
+ */
+export function buildTools(mcpTools: McpToolMeta[] = []): ToolDefinition[] {
+  const mcpDefs: ToolDefinition[] = mcpTools.map((m) => ({
+    type: "function",
+    function: {
+      name: m.name,
+      description: m.description || `MCP tool: ${m.originalName}`,
+      parameters: m.inputSchema as Record<string, unknown>,
+    },
+  }));
+  const mcpNames = new Set(mcpDefs.map((d) => d.function.name));
+  const staticFiltered = STATIC_TOOLS.filter((t) => !mcpNames.has(t.function.name));
+  return [...staticFiltered, ...mcpDefs];
+}
+
 export type ImagePart = { type: "image_url"; image_url: { url: string } };
 export type UserContent = string | Array<{ type: "text"; text: string } | ImagePart>;
 
@@ -255,7 +288,26 @@ export function buildSkillsSection(skills: SkillInfo[], readToolName = "Read"): 
   ].join("\n");
 }
 
-function systemPrompt(projectRoot: string | null, planMode: boolean, skills: SkillInfo[]): string {
+function buildMcpSection(mcpTools: McpToolMeta[]): string {
+  if (mcpTools.length === 0) return "";
+  const items = mcpTools
+    .map((t) => `- ${t.name}: ${t.description || t.originalName}`)
+    .join("\n");
+  return [
+    "",
+    "mcp_tools:",
+    "The following external MCP tools are available in addition to built-in tools.",
+    "Call them exactly like any other tool using their full namespaced name.",
+    items,
+  ].join("\n");
+}
+
+function systemPrompt(
+  projectRoot: string | null,
+  planMode: boolean,
+  skills: SkillInfo[],
+  mcpTools: McpToolMeta[],
+): string {
   const folder = projectRoot ?? "(no folder selected yet - ask the user to choose one)";
   const base = [
     "You are Bot Yar, an expert software engineering agent working directly on the user's machine.",
@@ -271,10 +323,13 @@ function systemPrompt(projectRoot: string | null, planMode: boolean, skills: Ski
     "- Never invent file contents you have not read. Never leave TODO placeholders in code.",
     "- Reply in the user's language (Arabic or English). Be concise between tool calls.",
   ].join("\n");
-  if (!planMode) return base + buildSkillsSection(skills);
+  const skillsSection = buildSkillsSection(skills);
+  const mcpSection   = buildMcpSection(mcpTools);
+  if (!planMode) return base + skillsSection + mcpSection;
   return (
     base +
-    buildSkillsSection(skills) +
+    skillsSection +
+    mcpSection +
     "\n\nPLAN MODE ACTIVE: For any non-trivial task, first build the todo list (update_todos) with all steps pending, briefly explain the plan, and wait for the user to approve before executing. Mark steps in_progress/completed as you go."
   );
 }
@@ -283,6 +338,8 @@ export class AgentRunner {
   private controller = new AbortController();
   private messages: AgentMessage[] = [];
   private pendingImages: string[] = [];
+  /** Lookup: namespaced name → McpToolMeta */
+  private mcpToolMap: Map<string, McpToolMeta>;
 
   constructor(
     private config: ChatConfig,
@@ -292,9 +349,11 @@ export class AgentRunner {
     private hooks: AgentHooks,
     history: AgentMessage[],
     skills: SkillInfo[] = [],
+    private mcpTools: McpToolMeta[] = [],
   ) {
+    this.mcpToolMap = new Map(mcpTools.map((t) => [t.name, t]));
     this.messages = [...history];
-    const system = systemPrompt(projectRoot, planMode, skills);
+    const system = systemPrompt(projectRoot, planMode, skills, mcpTools);
     if (!this.messages.some((m) => m.role === "system")) {
       this.messages.unshift({ role: "system", content: system });
     } else {
@@ -379,7 +438,7 @@ export class AgentRunner {
       body: JSON.stringify({
         model: this.config.model,
         messages: this.messages,
-        tools: TOOLS,
+        tools: buildTools(this.mcpTools),
         stream: true,
       }),
     });
@@ -442,6 +501,17 @@ export class AgentRunner {
   }
 
   private async executeTool(name: string, args: Record<string, unknown>): Promise<string> {
+    // ── MCP dynamic tools ────────────────────────────────────────────
+    const mcpMeta = this.mcpToolMap.get(name);
+    if (mcpMeta) {
+      try {
+        return await window.botyar.mcpCallTool(mcpMeta.serverId, mcpMeta.originalName, args);
+      } catch (error) {
+        return `MCP tool error (${name}): ${String(error)}`;
+      }
+    }
+
+    // ── Static tools ─────────────────────────────────────────────────
     const root = this.projectRoot;
     const str = (key: string, fallback = "") => (typeof args[key] === "string" ? (args[key] as string) : fallback);
     const needsRoot = !["update_todos", "ask_user", "WebSearch", "WebFetch"].includes(name);
