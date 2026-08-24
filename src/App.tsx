@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import "./styles.css";
 
 import { Sidebar }        from "./components/Sidebar";
@@ -14,6 +14,7 @@ import {
   AgentRunner,
   type SkillInfo, type TodoItem,
   type EditProposal, type PendingQuestion,
+  type McpToolMeta, type AgentMessage,
 } from "./agent";
 import { STRINGS, type Lang } from "./i18n";
 import { useWorkspace }       from "./hooks/useWorkspace";
@@ -45,12 +46,13 @@ type Resolver<T> = { resolve: (v: T) => void; reject: (e: unknown) => void };
 export default function App() {
   /* ── Workspace ── */
   const {
-    sessions, activeSessionId,
-    createSession, setActiveSession,
-    deleteSession, updateSession,
+    sessions, activeSession,
+    createSession, switchSession,
+    deleteSession, patchSession, persistSession,
+    activeProject, createProject,
   } = useWorkspace();
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId) ?? sessions[0];
+  const activeSessionId = activeSession?.id ?? "";
 
   /* ── Settings ── */
   const [model,        setModel]        = useState(() => localStorage.getItem("model")         || DEFAULT_MODELS[0]);
@@ -75,6 +77,10 @@ export default function App() {
   const [skills,       setSkills]       = useState<SkillInfo[]>([]);
   const [mcpToolCount, setMcpToolCount] = useState(0);
   const [treeRefresh,  setTreeRefresh]  = useState(0);
+
+  useEffect(() => {
+    void window.botyar.mcpListAllTools().then((tools) => setMcpToolCount(tools.length)).catch(() => {});
+  }, []);
 
   /* ── Runner refs ── */
   const runnersRef = useRef<Record<string, AgentRunner>>({});
@@ -124,15 +130,13 @@ export default function App() {
   }
 
   /* ── Runner factory (creates new runner per send with correct hooks) ── */
-  function buildRunner(sessionId: string, currentHistory: ChatMessage[]): AgentRunner {
+  function buildRunner(sessionId: string, currentHistory: ChatMessage[], mcpTools: McpToolMeta[]): AgentRunner {
     const live = getLive(sessionId);
 
     // Convert ChatMessage[] → AgentMessage[]
-    const agentHistory = currentHistory.map((m) => ({
+    const agentHistory: AgentMessage[] = currentHistory.map((m) => ({
       role:    m.role as "user" | "assistant",
       content: m.content,
-      id:      m.id,
-      createdAt: m.createdAt,
     }));
 
     return new AgentRunner(
@@ -142,15 +146,15 @@ export default function App() {
       autoApprove,
       {
         onAssistantDelta: (chunk) => {
-          setLiveSessions((prev) => ({
-            ...prev,
-            [sessionId]: { ...(prev[sessionId] ?? makeLive()), streaming: chunk },
-          }));
+          setLiveSessions((prev) => {
+            const s = prev[sessionId] ?? makeLive();
+            return { ...prev, [sessionId]: { ...s, streaming: s.streaming + chunk } };
+          });
         },
         onAssistantMessage: (text) => {
           const msg: ChatMessage = {
             id: crypto.randomUUID(), role: "assistant",
-            content: text, createdAt: new Date().toISOString(),
+            content: text, createdAt: Date.now(),
           };
           setLiveSessions((prev) => {
             const s = prev[sessionId] ?? makeLive();
@@ -206,13 +210,15 @@ export default function App() {
       },
       agentHistory,
       skills,
+      mcpTools,
     );
   }
 
   /* ── Send ── */
   async function handleSend(text: string) {
-    if (!activeSessionId) return;
+    if (!activeSessionId || !activeSession) return;
     if (getLive(activeSessionId).running) return;
+    if (!apiKey) { setSettingsTab("general"); setSettingsOpen(true); return; }
 
     // Slash commands
     if (text.startsWith("/")) {
@@ -227,7 +233,7 @@ export default function App() {
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(), role: "user",
-      content: text, createdAt: new Date().toISOString(),
+      content: text, createdAt: Date.now(),
     };
 
     const prevHistory = getLive(activeSessionId).history;
@@ -235,11 +241,13 @@ export default function App() {
 
     setLive(activeSessionId, { history: nextHistory, running: true, streaming: "" });
 
-    if (!activeSession?.title) {
-      updateSession(activeSessionId, { title: text.slice(0, 40) });
-    }
+    const title = activeSession.title || text.slice(0, 40);
+    patchSession(activeSessionId, { title, model });
 
-    const runner = buildRunner(activeSessionId, nextHistory);
+    const mcpForRun = await window.botyar.mcpListAllTools().catch(() => []) as McpToolMeta[];
+    setMcpToolCount(mcpForRun.length);
+
+    const runner = buildRunner(activeSessionId, nextHistory, mcpForRun);
     runnersRef.current[activeSessionId] = runner;
     runner.addUserTurn(text);
 
@@ -249,14 +257,23 @@ export default function App() {
       const finalHistory = runner.getHistory()
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({
-          id:        (m as { id?: string }).id ?? crypto.randomUUID(),
+          id:        crypto.randomUUID(),
           role:      m.role as ChatMessage["role"],
           content:   typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-          createdAt: (m as { createdAt?: string }).createdAt ?? new Date().toISOString(),
+          createdAt: Date.now(),
         }));
 
       setLive(activeSessionId, { running: false, streaming: "", history: finalHistory });
-      updateSession(activeSessionId, { messages: finalHistory });
+      const session = sessions.find((s) => s.id === activeSessionId);
+      if (session) {
+        persistSession({
+          ...session,
+          title,
+          model,
+          messages: finalHistory,
+          updatedAt: Date.now(),
+        });
+      }
       delete runnersRef.current[activeSessionId];
     }
   }
@@ -273,18 +290,26 @@ export default function App() {
   }
 
   /* ── New session ── */
-  function handleNewSession() {
-    const root = getLive(activeSessionId).projectRoot;
-    const id   = createSession();
-    setLive(id, makeLive(root));
+  async function handleNewSession() {
+    const root = activeId2Root();
+    const session = await createSession(activeProject?.id ?? undefined);
+    setLive(session.id, makeLive(root));
+  }
+
+  function activeId2Root(): string | null {
+    return getLive(activeSessionId).projectRoot ?? activeProject?.rootPath ?? null;
   }
 
   /* ── Pick folder ── */
   async function handlePickFolder() {
     const dir = await window.botyar.pickFolder();
     if (!dir) return;
-    setLive(activeSessionId, { projectRoot: dir });
-    const sk = await window.botyar.listSkills(dir).catch(() => []);
+    if (!activeProject) {
+      const name = dir.split(/[\\/]/).pop() ?? "Project";
+      await createProject(name, dir);
+    }
+    if (activeSessionId) setLive(activeSessionId, { projectRoot: dir });
+    const sk = await window.botyar.skillsList(dir).catch(() => []);
     setSkills(sk);
     setTreeRefresh((n) => n + 1);
   }
@@ -320,7 +345,7 @@ export default function App() {
         mcpToolCount={mcpToolCount}
         onNewSession={handleNewSession}
         onPickFolder={handlePickFolder}
-        onSwitchSession={setActiveSession}
+        onSwitchSession={switchSession}
         onDeleteSession={deleteSession}
         onOpenSettings={(tab) => { setSettingsTab(tab ?? "general"); setSettingsOpen(true); }}
         onSkillClick={() => {}}
