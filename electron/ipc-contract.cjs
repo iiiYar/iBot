@@ -12,7 +12,7 @@ const IPC = Object.freeze({
   },
   shell: {
     openPath: "shell:openPath",
-    exec:     "shell:exec",       // alias for proc:run
+    exec:     "shell:exec",
   },
 
   // ── File System ─────────────────────────────────────────────────
@@ -56,9 +56,18 @@ const IPC = Object.freeze({
     list: "skills:list",
   },
 
+  // ── Projects ─────────────────────────────────────────────────────
+  projects: {
+    list:   "projects:list",
+    get:    "projects:get",
+    save:   "projects:save",
+    delete: "projects:delete",
+  },
+
   // ── Sessions ─────────────────────────────────────────────────────
   sessions: {
     list:   "sessions:list",
+    get:    "sessions:get",
     save:   "sessions:save",
     delete: "sessions:delete",
   },

@@ -1,35 +1,39 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog, shell, screen, safeStorage } = require("electron");
-const path = require("node:path");
-const fs = require("node:fs");
-const fsp = require("node:fs/promises");
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require("electron");
+const path   = require("node:path");
+const fs     = require("node:fs");
+const fsp    = require("node:fs/promises");
 const { spawn } = require("node:child_process");
 
-const { createWindowState } = require("./window-state.cjs");
-const { createSecretStore } = require("./secret-store.cjs");
-const { IPC } = require("./ipc-contract.cjs");
+const { createWindowState }   = require("./window-state.cjs");
+const { createSecretStore }   = require("./secret-store.cjs");
+const { createProjectStore }  = require("./project-store.cjs");
+const { createSessionStore }  = require("./session-store.cjs");
+const { IPC }                 = require("./ipc-contract.cjs");
 
-// ── Module singletons (created after app ready) ─────────────────────────────
+// ── Singletons ────────────────────────────────────────────────────
 let windowState = null;
-let secrets = null;
-let mainWindow = null;
+let secrets     = null;
+let projects    = null;
+let sessions    = null;
+let mainWindow  = null;
 
-// ── Window creation ─────────────────────────────────────────────────────────
+// ── Window ────────────────────────────────────────────────────────
 function createWindow() {
   const placement = windowState.resolveWindowPlacement();
 
   mainWindow = new BrowserWindow({
     ...placement.windowOptions,
     backgroundColor: "#0d1117",
-    title: "iBot",
-    show: false,
+    title:           "iBot",
+    show:            false,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload:          path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
+      nodeIntegration:  false,
+      sandbox:          false,
     },
   });
 
@@ -46,7 +50,7 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
-// ── Path guard ──────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 function resolveInside(root, rel) {
   const abs = path.resolve(root, rel || ".");
   const normalizedRoot = path.resolve(root);
@@ -56,14 +60,12 @@ function resolveInside(root, rel) {
   return abs;
 }
 
-// ── HTML helpers ────────────────────────────────────────────────────────────
 function stripTags(html) {
   return html
     .replace(/<[^>]*>/g, "")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&nbsp;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\s+/g, " ").trim();
 }
 
 function htmlToText(html) {
@@ -87,7 +89,6 @@ function htmlToText(html) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-// ── File walker ─────────────────────────────────────────────────────────────
 function globToRegExp(pattern) {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
@@ -114,13 +115,14 @@ async function walkFiles(root, current, out, depth = 0) {
   }
 }
 
-// ── App ready ───────────────────────────────────────────────────────────────
+// ── App Ready ─────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  // Initialise modules that need app.getPath()
   windowState = createWindowState(app, screen);
-  secrets = createSecretStore(app);
+  secrets     = createSecretStore(app);
+  projects    = createProjectStore(app);
+  sessions    = createSessionStore(app);
 
-  // ── Dialog & Shell ────────────────────────────────────────────────
+  // ── Dialog & Shell ──────────────────────────────────────────────
   ipcMain.handle(IPC.dialog.pickFolder, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openDirectory", "createDirectory"],
@@ -132,7 +134,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.shell.openPath, async (_e, target) => shell.openPath(target));
 
-  // ── File System ───────────────────────────────────────────────────
+  // ── File System ──────────────────────────────────────────────────
   ipcMain.handle(IPC.fs.list, async (_e, root, rel) => {
     const abs = resolveInside(root, rel);
     const entries = await fsp.readdir(abs, { withFileTypes: true });
@@ -179,7 +181,7 @@ app.whenReady().then(() => {
     const content = await fsp.readFile(abs, "utf8");
     const lines = content.split("\n");
     const start = Math.max(1, startLine ?? 1);
-    const end = Math.min(lines.length, endLine ?? lines.length);
+    const end   = Math.min(lines.length, endLine ?? lines.length);
     const slice = lines.slice(start - 1, end);
     const numbered = slice.map((line, i) => `${String(start + i).padStart(6)}  ${line}`).join("\n");
     const truncated = end < lines.length
@@ -213,7 +215,7 @@ app.whenReady().then(() => {
     return `data:${mimes[ext]};base64,${fs.readFileSync(abs).toString("base64")}`;
   });
 
-  // ── Process (Shell) ───────────────────────────────────────────────
+  // ── Process ──────────────────────────────────────────────────────
   ipcMain.handle(IPC.proc.run, (_e, root, command) => {
     return new Promise((resolve) => {
       if (!root || !fs.existsSync(root)) {
@@ -237,7 +239,7 @@ app.whenReady().then(() => {
     });
   });
 
-  // ── Network ───────────────────────────────────────────────────────
+  // ── Network ──────────────────────────────────────────────────────
   ipcMain.handle(IPC.net.fetch, async (_e, url) => {
     try {
       const parsed = new URL(url);
@@ -265,7 +267,7 @@ app.whenReady().then(() => {
       const contentType = response.headers.get("content-type") ?? "";
       if (
         !contentType.includes("text/") && !contentType.includes("json") &&
-        !contentType.includes("xml") && !contentType.includes("javascript")
+        !contentType.includes("xml")  && !contentType.includes("javascript")
       ) {
         return { error: `Unsupported content type: ${contentType}` };
       }
@@ -287,7 +289,7 @@ app.whenReady().then(() => {
       clearTimeout(timer);
       const html = await response.text();
       const results = [];
-      const blockRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+      const blockRegex   = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
       const snippetRegex = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
       const snippets = [];
       let sm;
@@ -305,7 +307,7 @@ app.whenReady().then(() => {
     }
   });
 
-  // ── Secrets (safeStorage / DPAPI) ─────────────────────────────────
+  // ── Secrets ───────────────────────────────────────────────────────
   ipcMain.handle(IPC.secrets.isAvailable, () => secrets.isAvailable());
   ipcMain.handle(IPC.secrets.set,    async (_e, key, value) => { await secrets.set(key, value); return true; });
   ipcMain.handle(IPC.secrets.get,    (_e, key) => secrets.get(key));
@@ -320,8 +322,8 @@ app.whenReady().then(() => {
     fs.mkdirSync(dir, { recursive: true });
     const defaults = {
       "review.md": "---\nname: review\ndescription: Review recent changes for bugs, security issues, and quality problems.\n---\n# Code Review\n\nReview the most recent changes in this project:\n\n1. Run `git diff` and `git status` to see what changed (or read the files the user mentioned).\n2. Examine every changed file for: bugs, edge cases, security issues, performance problems, and readability.\n3. Report findings grouped by severity: Critical / Warning / Suggestion.\n4. For each finding, cite the file and line, explain the issue, and show a concrete fix.\n5. Do NOT change any files unless the user asks you to apply the fixes.\n",
-      "goal.md": "---\nname: goal\ndescription: Define a clear goal and step-by-step plan for a task, then save it as the todo list.\n---\n# Goal Setting\n\nThe user will describe an objective. Your job:\n\n1. Restate the goal in one precise sentence and confirm success criteria.\n2. Break it into concrete, verifiable steps (3-8 steps).\n3. Save the steps with the update_todos tool (all pending).\n4. Identify risks, unknowns, or missing information before starting.\n5. Ask the user to confirm the plan before executing.\n",
-      "test.md": "---\nname: test\ndescription: Run the project tests, diagnose failures, and fix them.\n---\n# Test & Fix\n\n1. Detect the test setup (package.json scripts, pytest, go test...).\n2. Run the test suite with the Shell tool.\n3. For each failure: read the failing code, identify the root cause, and fix it minimally.\n4. Re-run until green. Report a summary of what was broken and what you changed.\n",
+      "goal.md":   "---\nname: goal\ndescription: Define a clear goal and step-by-step plan for a task, then save it as the todo list.\n---\n# Goal Setting\n\nThe user will describe an objective. Your job:\n\n1. Restate the goal in one precise sentence and confirm success criteria.\n2. Break it into concrete, verifiable steps (3-8 steps).\n3. Save the steps with the update_todos tool (all pending).\n4. Identify risks, unknowns, or missing information before starting.\n5. Ask the user to confirm the plan before executing.\n",
+      "test.md":   "---\nname: test\ndescription: Run the project tests, diagnose failures, and fix them.\n---\n# Test & Fix\n\n1. Detect the test setup (package.json scripts, pytest, go test...).\n2. Run the test suite with the Shell tool.\n3. For each failure: read the failing code, identify the root cause, and fix it minimally.\n4. Re-run until green. Report a summary of what was broken and what you changed.\n",
       "commit.md": "---\nname: commit\ndescription: Create a clean git commit for the current changes with a good message.\n---\n# Commit\n\n1. Run `git status` and `git diff` to understand the changes.\n2. Group changes logically if they cover unrelated concerns (ask the user if unsure).\n3. Write a conventional commit message (feat/fix/refactor/chore: short imperative summary + body explaining why).\n4. Stage and commit. Never push unless asked.\n",
       "explain.md": "---\nname: explain\ndescription: Explain a file, folder, or concept from this project in depth.\n---\n# Explain\n\nThe user will name a file, folder, or concept.\n\n1. Read the relevant code thoroughly (Read/Glob/Grep).\n2. Explain top-down: purpose, architecture, data flow, then key implementation details.\n3. Use short code excerpts as evidence. Adapt depth to the user's expertise.\n",
     };
@@ -339,7 +341,7 @@ app.whenReady().then(() => {
       const base = path.basename(fullPath).replace(/\.md$/i, "");
       let name = base, description = "";
       if (fm) {
-        name = (/^name:\s*(.+)$/m.exec(fm[1]) || [])[1]?.trim() || base;
+        name        = (/^name:\s*(.+)$/m.exec(fm[1]) || [])[1]?.trim() || base;
         description = (/^description:\s*(.+)$/m.exec(fm[1]) || [])[1]?.trim() || "";
       }
       return { name, description, path: fullPath, source: fullPath.startsWith(skillsDir()) ? "global" : "project" };
@@ -361,31 +363,23 @@ app.whenReady().then(() => {
     return out;
   });
 
-  // ── Sessions ──────────────────────────────────────────────────────
-  const sessionsDir = () => path.join(app.getPath("userData"), "sessions");
+  // ── Projects ─────────────────────────────────────────────────────
+  ipcMain.handle(IPC.projects.list,   () => projects.list());
+  ipcMain.handle(IPC.projects.get,    (_e, id) => projects.get(id));
+  ipcMain.handle(IPC.projects.save,   (_e, input) => projects.save(input));
+  ipcMain.handle(IPC.projects.delete, (_e, id) => projects.delete(id));
 
-  ipcMain.handle(IPC.sessions.save, (_e, session) => {
-    fs.mkdirSync(sessionsDir(), { recursive: true });
-    fs.writeFileSync(path.join(sessionsDir(), `${session.id}.json`), JSON.stringify(session), "utf8");
-    return true;
+  // ── Sessions ─────────────────────────────────────────────────────
+  ipcMain.handle(IPC.sessions.list,   (_e, projectId) => sessions.list(projectId));
+  ipcMain.handle(IPC.sessions.get,    (_e, id) => sessions.get(id));
+  ipcMain.handle(IPC.sessions.save, async (_e, input) => {
+    const saved = await sessions.save(input);
+    if (saved.projectId) await projects.touchSession(saved.projectId, saved.id);
+    return saved;
   });
+  ipcMain.handle(IPC.sessions.delete, (_e, id) => sessions.delete(id));
 
-  ipcMain.handle(IPC.sessions.list, () => {
-    if (!fs.existsSync(sessionsDir())) return [];
-    const out = [];
-    for (const file of fs.readdirSync(sessionsDir())) {
-      if (!file.endsWith(".json")) continue;
-      try { out.push(JSON.parse(fs.readFileSync(path.join(sessionsDir(), file), "utf8"))); } catch {}
-    }
-    return out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-  });
-
-  ipcMain.handle(IPC.sessions.delete, (_e, id) => {
-    try { fs.rmSync(path.join(sessionsDir(), `${id}.json`), { force: true }); } catch {}
-    return true;
-  });
-
-  // ── Create window ─────────────────────────────────────────────────
+  // ── Launch ───────────────────────────────────────────────────────
   createWindow();
 
   app.on("activate", () => {
