@@ -1,19 +1,29 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+"use strict";
+
+const { app, BrowserWindow, ipcMain, dialog, shell, screen, safeStorage } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const { spawn } = require("node:child_process");
 
+const { createWindowState } = require("./window-state.cjs");
+const { createSecretStore } = require("./secret-store.cjs");
+const { IPC } = require("./ipc-contract.cjs");
+
+// ── Module singletons (created after app ready) ─────────────────────────────
+let windowState = null;
+let secrets = null;
 let mainWindow = null;
 
+// ── Window creation ─────────────────────────────────────────────────────────
 function createWindow() {
+  const placement = windowState.resolveWindowPlacement();
+
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1020,
-    minHeight: 640,
+    ...placement.windowOptions,
     backgroundColor: "#0d1117",
-    title: "Bot Yar",
+    title: "iBot",
+    show: false,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -23,6 +33,8 @@ function createWindow() {
     },
   });
 
+  windowState.apply(mainWindow, placement);
+
   if (process.env.BOTYAR_DEV === "1") {
     mainWindow.loadURL("http://localhost:5173");
     mainWindow.webContents.openDevTools();
@@ -30,9 +42,11 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "..", "dist-renderer", "index.html"));
   }
 
+  mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
+// ── Path guard ──────────────────────────────────────────────────────────────
 function resolveInside(root, rel) {
   const abs = path.resolve(root, rel || ".");
   const normalizedRoot = path.resolve(root);
@@ -42,6 +56,7 @@ function resolveInside(root, rel) {
   return abs;
 }
 
+// ── HTML helpers ────────────────────────────────────────────────────────────
 function stripTags(html) {
   return html
     .replace(/<[^>]*>/g, "")
@@ -72,7 +87,9 @@ function htmlToText(html) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function globToRegExp(pattern) {  const escaped = pattern
+// ── File walker ─────────────────────────────────────────────────────────────
+function globToRegExp(pattern) {
+  const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*/g, "\u0000")
     .replace(/\*/g, "[^/\\\\]*")
@@ -89,7 +106,7 @@ async function walkFiles(root, current, out, depth = 0) {
     if (out.length >= 2000) return;
     const full = path.join(current, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === ".build") continue;
+      if (["node_modules", ".git", "dist", ".build"].includes(entry.name)) continue;
       await walkFiles(root, full, out, depth + 1);
     } else if (entry.isFile()) {
       out.push(path.relative(root, full));
@@ -97,8 +114,14 @@ async function walkFiles(root, current, out, depth = 0) {
   }
 }
 
+// ── App ready ───────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  ipcMain.handle("dialog:pickFolder", async () => {
+  // Initialise modules that need app.getPath()
+  windowState = createWindowState(app, screen);
+  secrets = createSecretStore(app);
+
+  // ── Dialog & Shell ────────────────────────────────────────────────
+  ipcMain.handle(IPC.dialog.pickFolder, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openDirectory", "createDirectory"],
       title: "اختر مجلد المشروع",
@@ -107,33 +130,34 @@ app.whenReady().then(() => {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("shell:openPath", async (_e, target) => shell.openPath(target));
+  ipcMain.handle(IPC.shell.openPath, async (_e, target) => shell.openPath(target));
 
-  ipcMain.handle("fs:list", async (_e, root, rel) => {
+  // ── File System ───────────────────────────────────────────────────
+  ipcMain.handle(IPC.fs.list, async (_e, root, rel) => {
     const abs = resolveInside(root, rel);
     const entries = await fsp.readdir(abs, { withFileTypes: true });
     const out = [];
     for (const entry of entries) {
       let size = 0;
-      try {
-        if (entry.isFile()) size = (await fsp.stat(path.join(abs, entry.name))).size;
-      } catch {}
+      try { if (entry.isFile()) size = (await fsp.stat(path.join(abs, entry.name))).size; } catch {}
       out.push({ name: entry.name, type: entry.isDirectory() ? "dir" : "file", size });
     }
     out.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
     return out.slice(0, 800);
   });
 
-  ipcMain.handle("fs:glob", async (_e, root, pattern) => {
+  ipcMain.handle(IPC.fs.glob, async (_e, root, pattern) => {
     const files = [];
     await walkFiles(root, root, files);
     const regex = globToRegExp(pattern);
     return files.filter((f) => regex.test(f.split(path.sep).join("/"))).slice(0, 300);
   });
 
-  ipcMain.handle("fs:grep", (_e, root, pattern, glob) => {
+  ipcMain.handle(IPC.fs.grep, (_e, root, pattern, glob) => {
     return new Promise((resolve) => {
-      const globFilter = glob && glob !== "*" ? `| Where-Object { $_.FullName -like "*\\${glob.replace(/'/g, "''")}" }` : "";
+      const globFilter = glob && glob !== "*"
+        ? `| Where-Object { $_.FullName -like "*\\${glob.replace(/'/g, "''")}" }`
+        : "";
       const safePattern = pattern.replace(/'/g, "''");
       const script = [
         `Get-ChildItem -LiteralPath '${root.replace(/'/g, "''")}' -Recurse -File -ErrorAction SilentlyContinue`,
@@ -150,7 +174,7 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle("fs:read", async (_e, root, rel, startLine, endLine) => {
+  ipcMain.handle(IPC.fs.read, async (_e, root, rel, startLine, endLine) => {
     const abs = resolveInside(root, rel);
     const content = await fsp.readFile(abs, "utf8");
     const lines = content.split("\n");
@@ -158,86 +182,108 @@ app.whenReady().then(() => {
     const end = Math.min(lines.length, endLine ?? lines.length);
     const slice = lines.slice(start - 1, end);
     const numbered = slice.map((line, i) => `${String(start + i).padStart(6)}  ${line}`).join("\n");
-    const truncated = end < lines.length ? `\n\n[Showing lines ${start}-${end} of ${lines.length}. Use start_line/end_line to read more.]` : "";
+    const truncated = end < lines.length
+      ? `\n\n[Showing lines ${start}-${end} of ${lines.length}. Use start_line/end_line to read more.]`
+      : "";
     return (numbered + truncated).slice(0, 256 * 1024);
   });
 
-  ipcMain.handle("fs:readRaw", async (_e, root, rel) => {
+  ipcMain.handle(IPC.fs.readRaw, async (_e, root, rel) => {
     const abs = resolveInside(root, rel);
     return await fsp.readFile(abs, "utf8");
   });
 
-  ipcMain.handle("fs:write", async (_e, root, rel, content) => {
+  ipcMain.handle(IPC.fs.write, async (_e, root, rel, content) => {
     const abs = resolveInside(root, rel);
     await fsp.mkdir(path.dirname(abs), { recursive: true });
     await fsp.writeFile(abs, content, "utf8");
     return { written: content.length, path: abs };
   });
 
-  ipcMain.handle("proc:run", (_e, root, command) => {
+  ipcMain.handle(IPC.fs.readImage, (_e, root, rel) => {
+    const abs = resolveInside(root, rel);
+    const ext = path.extname(abs).toLowerCase();
+    const mimes = {
+      ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+      ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    };
+    if (!mimes[ext]) throw new Error(`Not a supported image type: ${ext}`);
+    const stat = fs.statSync(abs);
+    if (stat.size > 5 * 1024 * 1024) throw new Error("Image larger than 5MB");
+    return `data:${mimes[ext]};base64,${fs.readFileSync(abs).toString("base64")}`;
+  });
+
+  // ── Process (Shell) ───────────────────────────────────────────────
+  ipcMain.handle(IPC.proc.run, (_e, root, command) => {
     return new Promise((resolve) => {
       if (!root || !fs.existsSync(root)) {
         resolve({ code: -1, stdout: "", stderr: "No project folder selected" });
         return;
       }
-      const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
-        cwd: root,
-        windowsHide: true,
-      });
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        { cwd: root, windowsHide: true }
+      );
       let stdout = "", stderr = "";
       const timer = setTimeout(() => {
         try { spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }); } catch {}
         resolve({ code: 124, stdout, stderr: (stderr + "\n[TIMEOUT after 120s]").trim() });
-      }, 120000);
-      child.stdout.on("data", (d) => { stdout += d.toString("utf8"); if (stdout.length > 60000) stdout = stdout.slice(-60000); });
-      child.stderr.on("data", (d) => { stderr += d.toString("utf8"); if (stderr.length > 30000) stderr = stderr.slice(-30000); });
+      }, 120_000);
+      child.stdout.on("data", (d) => { stdout += d.toString("utf8"); if (stdout.length > 60_000) stdout = stdout.slice(-60_000); });
+      child.stderr.on("data", (d) => { stderr += d.toString("utf8"); if (stderr.length > 30_000) stderr = stderr.slice(-30_000); });
       child.on("error", (err) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: String(err) }); });
       child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 0, stdout, stderr }); });
     });
   });
 
-  ipcMain.handle("net:fetch", async (_e, url) => {
+  // ── Network ───────────────────────────────────────────────────────
+  ipcMain.handle(IPC.net.fetch, async (_e, url) => {
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return { error: `Invalid URL protocol: ${parsed.protocol} (must be http or https)` };
+        return { error: `Invalid URL protocol: ${parsed.protocol}` };
       }
       const host = parsed.hostname.toLowerCase();
-      const display = parsed.port.length > 0 ? `${host}:${parsed.port}` : host;
-      if (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "::1" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
-        return { error: `Cannot fetch from localhost or private IP (${display}) because this tool runs from an isolated server.` };
+      if (
+        host === "localhost" || host.endsWith(".localhost") ||
+        host === "127.0.0.1" || host === "::1" ||
+        host.startsWith("127.") || host.startsWith("10.") ||
+        host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+      ) {
+        return { error: `Cannot fetch from localhost or private IP (${host})` };
       }
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
+      const timer = setTimeout(() => controller.abort(), 30_000);
       const response = await fetch(url, {
         signal: controller.signal,
         redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BotYar/0.3" },
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) iBot/1.0" },
       });
       clearTimeout(timer);
-      if (response.status !== 200) {
-        return { error: `The URL returned a non-200 status code: ${response.status}` };
-      }
+      if (response.status !== 200) return { error: `HTTP ${response.status}` };
       const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.includes("text/") && !contentType.includes("json") && !contentType.includes("xml") && !contentType.includes("javascript")) {
-        return { error: `Unsupported content type: ${contentType}. This tool does not support fetching binary content, e.g. media or PDFs.` };
+      if (
+        !contentType.includes("text/") && !contentType.includes("json") &&
+        !contentType.includes("xml") && !contentType.includes("javascript")
+      ) {
+        return { error: `Unsupported content type: ${contentType}` };
       }
       const html = await response.text();
-      return { content: htmlToText(html).slice(0, 150000), url };
+      return { content: htmlToText(html).slice(0, 150_000), url };
     } catch (error) {
-      const message = error?.name === "AbortError" ? "Fetch timed out after 30 seconds" : String(error);
-      return { error: message };
+      return { error: error?.name === "AbortError" ? "Fetch timed out after 30s" : String(error) };
     }
   });
 
-  ipcMain.handle("net:search", async (_e, searchTerm) => {
+  ipcMain.handle(IPC.net.search, async (_e, searchTerm) => {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 25000);
-      const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchTerm)}`, {
-        signal: controller.signal,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BotYar/0.3" },
-      });
+      const timer = setTimeout(() => controller.abort(), 25_000);
+      const response = await fetch(
+        `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchTerm)}`,
+        { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0 iBot/1.0" } }
+      );
       clearTimeout(timer);
       const html = await response.text();
       const results = [];
@@ -246,14 +292,12 @@ app.whenReady().then(() => {
       const snippets = [];
       let sm;
       while ((sm = snippetRegex.exec(html)) !== null) snippets.push(stripTags(sm[1]));
-      let m;
-      let index = 0;
+      let m, index = 0;
       while ((m = blockRegex.exec(html)) !== null && results.length < 10) {
         let href = m[1];
         const decoded = /uddg=([^&]*)/.exec(href);
         if (decoded) href = decodeURIComponent(decoded[1]);
-        results.push({ title: stripTags(m[2]), url: href, snippet: snippets[index] ?? "" });
-        index++;
+        results.push({ title: stripTags(m[2]), url: href, snippet: snippets[index++] ?? "" });
       }
       return { results };
     } catch (error) {
@@ -261,19 +305,15 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle("fs:readImage", (_e, root, rel) => {
-    const abs = resolveInside(root, rel);
-    const ext = path.extname(abs).toLowerCase();
-    const mimes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" };
-    if (!mimes[ext]) throw new Error(`Not a supported image type: ${ext}`);
-    const stat = fs.statSync(abs);
-    if (stat.size > 5 * 1024 * 1024) throw new Error("Image larger than 5MB");
-    const b64 = fs.readFileSync(abs).toString("base64");
-    return `data:${mimes[ext]};base64,${b64}`;
-  });
+  // ── Secrets (safeStorage / DPAPI) ─────────────────────────────────
+  ipcMain.handle(IPC.secrets.isAvailable, () => secrets.isAvailable());
+  ipcMain.handle(IPC.secrets.set,    async (_e, key, value) => { await secrets.set(key, value); return true; });
+  ipcMain.handle(IPC.secrets.get,    (_e, key) => secrets.get(key));
+  ipcMain.handle(IPC.secrets.delete, async (_e, key) => { await secrets.delete(key); return true; });
+  ipcMain.handle(IPC.secrets.has,    (_e, key) => secrets.has(key));
 
+  // ── Skills ────────────────────────────────────────────────────────
   const skillsDir = () => path.join(app.getPath("userData"), "skills");
-  const sessionsDir = () => path.join(app.getPath("userData"), "sessions");
 
   function ensureSeedSkills() {
     const dir = skillsDir();
@@ -306,7 +346,7 @@ app.whenReady().then(() => {
     } catch { return null; }
   }
 
-  ipcMain.handle("skills:list", (_e, projectRoot) => {
+  ipcMain.handle(IPC.skills.list, (_e, projectRoot) => {
     const out = [];
     const dirs = [skillsDir()];
     if (projectRoot && fs.existsSync(projectRoot)) dirs.push(path.join(projectRoot, ".botyar", "skills"));
@@ -321,30 +361,31 @@ app.whenReady().then(() => {
     return out;
   });
 
-  ipcMain.handle("sessions:save", (_e, session) => {
+  // ── Sessions ──────────────────────────────────────────────────────
+  const sessionsDir = () => path.join(app.getPath("userData"), "sessions");
+
+  ipcMain.handle(IPC.sessions.save, (_e, session) => {
     fs.mkdirSync(sessionsDir(), { recursive: true });
-    const file = path.join(sessionsDir(), `${session.id}.json`);
-    fs.writeFileSync(file, JSON.stringify(session), "utf8");
+    fs.writeFileSync(path.join(sessionsDir(), `${session.id}.json`), JSON.stringify(session), "utf8");
     return true;
   });
 
-  ipcMain.handle("sessions:list", () => {
+  ipcMain.handle(IPC.sessions.list, () => {
     if (!fs.existsSync(sessionsDir())) return [];
     const out = [];
     for (const file of fs.readdirSync(sessionsDir())) {
       if (!file.endsWith(".json")) continue;
-      try {
-        out.push(JSON.parse(fs.readFileSync(path.join(sessionsDir(), file), "utf8")));
-      } catch {}
+      try { out.push(JSON.parse(fs.readFileSync(path.join(sessionsDir(), file), "utf8"))); } catch {}
     }
     return out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   });
 
-  ipcMain.handle("sessions:delete", (_e, id) => {
+  ipcMain.handle(IPC.sessions.delete, (_e, id) => {
     try { fs.rmSync(path.join(sessionsDir(), `${id}.json`), { force: true }); } catch {}
     return true;
   });
 
+  // ── Create window ─────────────────────────────────────────────────
   createWindow();
 
   app.on("activate", () => {
