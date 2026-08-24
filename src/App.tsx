@@ -7,7 +7,7 @@ import { ChatHeader }    from "./components/ChatHeader";
 import { ChatThread, type ChatEntry } from "./components/ChatThread";
 import { Composer }      from "./components/Composer";
 import { SettingsModal, type SettingsConfig } from "./components/SettingsModal";
-import type { Session } from "./types/workspace";
+import type { Session, ChatMessage } from "./types/workspace";
 import type { McpToolInfo } from "./global";
 import type { TokenUsageData } from "./TokenUsage";
 import "./sand/sand.css";
@@ -49,6 +49,24 @@ function emptyLive(projectRoot: string | null = null): LiveSession {
 }
 
 function newId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+
+function toChatMessages(history: AgentMessage[]): ChatMessage[] {
+  return history.map((m) => {
+    let content = "";
+    if (m.role === "tool") {
+      content = (m as { content: string }).content ?? "";
+    } else if (typeof m.content === "string") {
+      content = m.content ?? "";
+    } else if (m.content == null) {
+      content = "";
+    } else if (Array.isArray(m.content)) {
+      content = (m.content as Array<{ type: string; text?: string }>).map((p) => (p.type === "text" ? (p.text ?? "") : "[image]")).join("\n");
+    } else {
+      content = String(m.content);
+    }
+    return { id: newId(), role: m.role as ChatMessage["role"], content, createdAt: Date.now() };
+  });
+}
 
 // ── App ───────────────────────────────────────────────────────────────
 export default function App() {
@@ -193,15 +211,16 @@ export default function App() {
     } catch (error) {
       patchLive(sessionId, (s) => ({ entries: [...s.entries, { kind: "error" as const, text: String(error) }] }));
     } finally {
-      patchLive(sessionId, { running: false, streaming: "" });
+      const history = runner.getHistory();
+      patchLive(sessionId, { running: false, streaming: "", history });
       runnerRefs.current.delete(sessionId);
       const updatedLive = liveSessions.get(sessionId);
-      if (updatedLive && session) {
+      if (session) {
         ws.persistSession({
           ...session, title,
-          messages:    updatedLive.history,
+          messages:    toChatMessages(history),
           model:       config.model,
-          tokenUsage:  updatedLive.tokenUsage,
+          tokenUsage:  updatedLive?.tokenUsage ?? live.tokenUsage,
           updatedAt:   Date.now(),
         });
       }
